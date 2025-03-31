@@ -8,6 +8,7 @@ package mr
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 )
@@ -26,45 +27,94 @@ type ExampleReply struct {
 }
 
 // Add your RPC definitions here.
-func workerSock(workerID string) string {
-	return "/var/tmp/5840-mr-worker-" + workerID
-}
-
-func (c *Coordinator) WorkerGetMapJob(workerID string, filename *string) error {
-	todoFile, ok := <-c.todoFiles
+func (c *Coordinator) WorkerGetMapJob(workerID string, mapTask *MapTask) error {
+	toMapTask, ok := <-c.toMapTasks
 	if ok {
-		*filename = todoFile
+		mapTask.Filename = toMapTask.Filename
+		mapTask.MapID = toMapTask.MapID
+		mapTask.NReduce = toMapTask.NReduce
 	} else {
-		*filename = "DONE" // no need to map
+		mapTask.Filename = "DONE" // no need to map
 		return nil
 	}
 
 	// worker registers
 	c.mu.Lock()
 	c.workerRegistry[workerID] = workerSock(workerID)
-	c.remainMapTask[*filename] = workerID
+	c.remainMapTask[toMapTask.Filename] = workerID
+	go c.monitorMapTask(toMapTask.Filename, toMapTask.MapID)
 	c.mu.Unlock()
 
 	return nil
 }
 
-func (c *Coordinator) WorkerGiveMapRes(mapRes MapRes, reply *string) error {
+func (c *Coordinator) WorkerGiveMapRes(mapTask MapTask, reply *string) error {
 	// Coordinator only accepts results from worker in workerRegistry
-	workerID := mapRes.WorkerID
-	filename := mapRes.Filename
-	kva := mapRes.Kva
+	workerID := mapTask.WorkerID
+	filename := mapTask.Filename
+	kva := mapTask.Result
 	_, exist := c.workerRegistry[workerID]
 	if !exist {
-		fmt.Println("Illegal result: get from unknown worker:", workerID)
+		fmt.Println("Illegal map result: get from unknown worker:", workerID)
 		return nil
 	}
 
 	c.mu.Lock()
 	c.intermediate = append(c.intermediate, kva...)
-	fmt.Println("Successfully get result from:", workerID)
-	fmt.Println("len of kva:", len(kva))
-	fmt.Println("len of intermediate:", len(c.intermediate))
+	if DEBUG {
+		fmt.Println("Successfully get map result from:", workerID)
+		// fmt.Println("len of kva:", len(kva))
+		// fmt.Println("len of intermediate:", len(c.intermediate))
+	}
 	delete(c.remainMapTask, filename)
+	// c.WorkerQuit(workerID, reply)
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *Coordinator) WorkerGetReduceTask(workerID string, reduceTask *ReduceTask) error {
+	toReduceTask, ok := <-c.toReduceTasks
+	if ok {
+		*reduceTask = toReduceTask
+		reduceTask.WorkerID = workerID
+		reduceTask.TempResFile = fmt.Sprintf("mr-tmp-%s", workerID)
+	} else {
+		reduceTask.ReduceID = "DONE"
+		return nil
+	}
+
+	// worker registers
+	c.mu.Lock()
+	c.workerRegistry[workerID] = workerSock(workerID)
+	c.remainReduceTask[toReduceTask.ReduceID] = workerID
+	go c.monitorReduceTask(toReduceTask.ReduceID)
+	c.mu.Unlock()
+
+	return nil
+}
+
+func (c *Coordinator) WorkerGiveReduceRes(reduceTask ReduceTask, reply *string) error {
+	// Coordinator only accepts results from worker in workerRegistry
+	workerID := reduceTask.WorkerID
+	_, exist := c.workerRegistry[workerID]
+	if !exist {
+		fmt.Println("Illegal reduce result: get from unknown worker:", workerID)
+		return nil
+	}
+
+	newname := fmt.Sprintf("mr-out-%s", reduceTask.ReduceID)
+	*reply = newname
+	err := os.Rename(reduceTask.TempResFile, newname)
+	if err != nil {
+		log.Fatal("Error when rename temp file:", err)
+	}
+
+	c.mu.Lock()
+	if DEBUG {
+		fmt.Println("Successfully get reduce result from:", workerID)
+	}
+	delete(c.remainReduceTask, reduceTask.ReduceID)
+	// delete(c.workerRegistry, workerID)
 	c.mu.Unlock()
 	return nil
 }
@@ -73,9 +123,15 @@ func (c *Coordinator) WorkerQuit(workerID string, reply *string) error {
 	_, exist := c.workerRegistry[workerID]
 	if exist {
 		delete(c.workerRegistry, workerID)
-		fmt.Println("Worker quit:", workerID)
+		if DEBUG {
+			fmt.Printf("Worker quit: <%s>\n", workerID)
+		}
+
 	} else {
-		fmt.Println("Unknown worker wants to quit", workerID)
+		if DEBUG {
+			fmt.Printf("Unknown worker wants to quit: <%s>\n", workerID)
+		}
+
 	}
 	return nil
 }
