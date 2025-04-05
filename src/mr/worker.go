@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-var DEBUG bool = true
+var DEBUG bool = false
 
 // Map functions return a slice of KeyValue.
 type KeyValue struct {
@@ -23,18 +23,21 @@ type KeyValue struct {
 }
 
 type MapTask struct {
-	WorkerID string
-	MapID    string
-	NMap     int
-	NReduce  int
-	Filename string
-	Result   []KeyValue
+	WorkerID      string
+	MapID         string
+	NMap          int
+	NReduce       int
+	Filename      string
+	Result        []KeyValue
+	AllMapDone    bool
+	AllReduceDone bool
 }
 
 type ReduceTask struct {
-	WorkerID    string
-	ReduceID    string
-	TempResFile string // created by worker
+	WorkerID      string
+	ReduceID      string
+	TempResFile   string // created by worker
+	AllReduceDone bool
 }
 
 func workerSock(workerID string) string {
@@ -58,20 +61,17 @@ func saveMapRes(kva []KeyValue, mapID string, nReduce int) {
 
 	for reduceID, kvs := range reduceChunks {
 		oname := fmt.Sprintf("mr-%s-%s.json", mapID, reduceID)
-		ofile, err := os.Create(oname)
-		if err != nil {
-			log.Fatal("Error when create file:", err)
-		}
+		ofile, _ := os.Create(oname)
 		defer ofile.Close()
 
 		enc := json.NewEncoder(ofile)
-		err = enc.Encode(&kvs)
+		err := enc.Encode(&kvs)
 		if err != nil {
 			log.Fatal("Error when encoding kv:", err)
 		}
 	}
 	if DEBUG {
-		fmt.Println("Finish save map result.")
+		fmt.Println("Finish saving map result.")
 	}
 }
 
@@ -119,18 +119,19 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Periodically ask for a task
 	mapDone := false    // flag whether all Map tasks have been finished
 	reduceDone := false // flag whether all Reduce tasks have been finished
+
 	// Do the map task
-	for !mapDone{
+	for !mapDone {
 		mapTask := MapTask{WorkerID: workerID}
 		if DEBUG {
 			fmt.Printf("<%s> ask for a map task...\n", workerID)
 		}
-		call("Coordinator.WorkerGetMapJob", workerID, &mapTask)
+		call("Coordinator.WorkerGetMapTask", workerID, &mapTask)
 		if DEBUG {
-			fmt.Printf("<%s> get task: %v\n", workerID, mapTask)
+			fmt.Printf("<%s> get task: %s\n", workerID, mapTask.Filename)
 		}
 
-		if mapTask.Filename != "DONE" {
+		if !mapTask.AllMapDone {
 			file, err := os.Open(mapTask.Filename)
 			if err != nil {
 				log.Fatalf("cannot open %v", mapTask.Filename)
@@ -148,10 +149,11 @@ func Worker(mapf func(string, string) []KeyValue,
 			call("Coordinator.WorkerGiveMapRes", mapTask, &reply)
 
 			// if DEBUG {
-			// 	time.Sleep(time.Second) // NOTE: this is to let other workers have chance
+			// 	time.Sleep(time.Second)
 			// }
 		} else {
 			mapDone = true
+			reduceDone = mapTask.AllReduceDone
 			if DEBUG {
 				fmt.Println("All map tasks done.")
 			}
@@ -161,7 +163,7 @@ func Worker(mapf func(string, string) []KeyValue,
 	}
 
 	// Do the Reduce task
-	for !reduceDone{
+	for !reduceDone {
 		reduceTask := ReduceTask{WorkerID: workerID}
 		if DEBUG {
 			fmt.Printf("<%s> ask for a reduce task...\n", workerID)
@@ -170,7 +172,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		if DEBUG {
 			fmt.Printf("<%s> get reduceID: %s\n", workerID, reduceTask.ReduceID)
 		}
-		if reduceTask.ReduceID != "DONE" {
+		if !reduceTask.AllReduceDone {
 			// Get Map result files to be Reduced
 			pattern := fmt.Sprintf(`^mr-.*-%s.json$`, regexp.QuoteMeta(reduceTask.ReduceID))
 			re := regexp.MustCompile(pattern)
@@ -197,7 +199,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			call("Coordinator.WorkerGiveReduceRes", reduceTask, &reply)
 			if DEBUG {
 				fmt.Printf("<%s> reduce res save to %s.\n", workerID, reply)
-				// time.Sleep(time.Second) // NOTE: let another worker have chance
+				// time.Sleep(time.Second)
 			}
 		} else {
 			reduceDone = true
@@ -205,14 +207,8 @@ func Worker(mapf func(string, string) []KeyValue,
 				fmt.Println("All reduce done.")
 			}
 		}
-		
-		time.Sleep(time.Second)
-	}
 
-	var reply string
-	call("Coordinator.WorkerQuit", workerID, &reply)
-	if DEBUG {
-		fmt.Printf("<%s> job done.\n", workerID)
+		time.Sleep(time.Second)
 	}
 }
 

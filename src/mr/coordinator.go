@@ -1,7 +1,6 @@
 package mr
 
 import (
-	"bufio"
 	"fmt"
 	"log"
 	"net"
@@ -9,24 +8,21 @@ import (
 	"net/rpc"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"sync"
 	"time"
 )
 
 type Coordinator struct {
-	// Your definitions here.
 	mu            sync.RWMutex
 	nMap          int
 	nReduce       int
 	toMapTasks    chan MapTask
 	toReduceTasks chan ReduceTask
-	// NOTE: consider use map[string]struct{}
+	// NOTE: consider using map[string]struct{}
 	remainMapTask    map[string]string // filename -> workerID
 	remainReduceTask map[string]string // reduceID -> workerID
-	workerRegistry   map[string]string // workerID -> wordAddr
-	intermediate     []KeyValue
+	workerRegistry   map[string]string // workerID -> workerAddr
 	allMapDone       bool
 	allReduceDone    bool
 }
@@ -40,7 +36,6 @@ func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 // Your code here -- RPC handlers for the worker to call.
-// TODO: copy rpc function here.
 
 // an example RPC handler.
 //
@@ -97,11 +92,10 @@ func (c *Coordinator) monitorReduceTask(reduceID string) {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	if !c.allMapDone || !c.allReduceDone || len(c.workerRegistry) > 0 {
+	if !c.allMapDone || !c.allReduceDone {
 		return false
 	}
 	deleteJSONs()
-	// mergeAndSortFiles("mr-out-final")
 	return true
 }
 
@@ -117,13 +111,13 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		remainMapTask:    make(map[string]string),
 		remainReduceTask: make(map[string]string),
 		workerRegistry:   make(map[string]string),
-		intermediate:     []KeyValue{},
 		allMapDone:       false,
 		allReduceDone:    false,
 	}
 
-	// Manage map tasks
+	// Manage Map tasks
 	go func() {
+		// Init todo Map tasks
 		for i, file := range files {
 			mapTask := MapTask{
 				Filename: file,
@@ -137,6 +131,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 			}
 			c.remainMapTask[file] = "init"
 		}
+		// Wait all Map tasks to be done
 		for len(c.remainMapTask) > 0 {
 			time.Sleep(time.Second)
 		}
@@ -147,20 +142,18 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		}
 	}()
 
-	// Manage reduce tasks
+	// Manage Reduce tasks
 	go func() {
 		// output files for reduce results
 		for i := 0; i < nReduce; i++ {
-			// NOTE: maybe use the trick of renaming file?
-			// os.Create(fmt.Sprintf("mr-out-%d", i))
 			c.toReduceTasks <- ReduceTask{ReduceID: strconv.Itoa(i)}
 			c.remainReduceTask[strconv.Itoa(i)] = "init"
 		}
-		// Wait map tasks to be done
+		// Wait all Map tasks to be done
 		for !c.allMapDone {
 			time.Sleep(time.Second)
 		}
-		// Wait reduce tasks to be done
+		// Wait all Reduce tasks to be done
 		for len(c.remainReduceTask) > 0 {
 			time.Sleep(time.Second)
 		}
@@ -170,7 +163,6 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 			fmt.Println("All reduce tasks done.")
 		}
 	}()
-
 	c.server()
 	return &c
 }
@@ -191,61 +183,4 @@ func deleteJSONs() {
 			log.Printf("Error deleting file %s: %v\n", file, err)
 		}
 	}
-}
-
-func mergeAndSortFiles(outputFileName string) error {
-	// 获取当前目录
-	dir, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("failed to get current directory: %w", err)
-	}
-
-	// 搜索当前目录下的所有"mr-out-*"文件
-	files, err := filepath.Glob(filepath.Join(dir, "mr-out-*"))
-	if err != nil {
-		return fmt.Errorf("failed to list files: %w", err)
-	}
-
-	// 用来存储所有文件的内容
-	var allLines []string
-
-	// 遍历每个文件，读取其内容
-	for _, file := range files {
-		f, err := os.Open(file)
-		if err != nil {
-			return fmt.Errorf("failed to open file %s: %w", file, err)
-		}
-		defer f.Close()
-
-		// 使用Scanner逐行读取文件内容
-		scanner := bufio.NewScanner(f)
-		for scanner.Scan() {
-			allLines = append(allLines, scanner.Text()) // 将每行内容加入到 allLines 中
-		}
-
-		// 检查是否有读取错误
-		if err := scanner.Err(); err != nil {
-			return fmt.Errorf("error reading file %s: %w", file, err)
-		}
-	}
-
-	// 对读取到的所有行进行字母序排序
-	sort.Strings(allLines)
-
-	// 创建输出文件
-	outFile, err := os.Create(outputFileName)
-	if err != nil {
-		return fmt.Errorf("failed to create output file: %w", err)
-	}
-	defer outFile.Close()
-
-	// 写入排序后的内容到输出文件
-	for _, line := range allLines {
-		_, err := outFile.WriteString(line + "\n")
-		if err != nil {
-			return fmt.Errorf("failed to write to output file: %w", err)
-		}
-	}
-
-	return nil
 }

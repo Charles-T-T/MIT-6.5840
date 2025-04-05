@@ -27,14 +27,15 @@ type ExampleReply struct {
 }
 
 // Add your RPC definitions here.
-func (c *Coordinator) WorkerGetMapJob(workerID string, mapTask *MapTask) error {
+func (c *Coordinator) WorkerGetMapTask(workerID string, mapTask *MapTask) error {
 	toMapTask, ok := <-c.toMapTasks
 	if ok {
 		mapTask.Filename = toMapTask.Filename
 		mapTask.MapID = toMapTask.MapID
 		mapTask.NReduce = toMapTask.NReduce
 	} else {
-		mapTask.Filename = "DONE" // no need to map
+		mapTask.AllMapDone = true // all Map tasks already done.
+		mapTask.AllReduceDone = c.allReduceDone
 		return nil
 	}
 
@@ -49,10 +50,9 @@ func (c *Coordinator) WorkerGetMapJob(workerID string, mapTask *MapTask) error {
 }
 
 func (c *Coordinator) WorkerGiveMapRes(mapTask MapTask, reply *string) error {
-	// Coordinator only accepts results from worker in workerRegistry
+	// Coordinator only accepts results from worker IN workerRegistry
 	workerID := mapTask.WorkerID
 	filename := mapTask.Filename
-	kva := mapTask.Result
 	_, exist := c.workerRegistry[workerID]
 	if !exist {
 		fmt.Println("Illegal map result: get from unknown worker:", workerID)
@@ -60,14 +60,10 @@ func (c *Coordinator) WorkerGiveMapRes(mapTask MapTask, reply *string) error {
 	}
 
 	c.mu.Lock()
-	c.intermediate = append(c.intermediate, kva...)
 	if DEBUG {
 		fmt.Println("Successfully get map result from:", workerID)
-		// fmt.Println("len of kva:", len(kva))
-		// fmt.Println("len of intermediate:", len(c.intermediate))
 	}
 	delete(c.remainMapTask, filename)
-	// c.WorkerQuit(workerID, reply)
 	c.mu.Unlock()
 	return nil
 }
@@ -79,7 +75,7 @@ func (c *Coordinator) WorkerGetReduceTask(workerID string, reduceTask *ReduceTas
 		reduceTask.WorkerID = workerID
 		reduceTask.TempResFile = fmt.Sprintf("mr-tmp-%s", workerID)
 	} else {
-		reduceTask.ReduceID = "DONE"
+		reduceTask.AllReduceDone = true // all Reduce tasks already done.
 		return nil
 	}
 
@@ -114,25 +110,8 @@ func (c *Coordinator) WorkerGiveReduceRes(reduceTask ReduceTask, reply *string) 
 		fmt.Println("Successfully get reduce result from:", workerID)
 	}
 	delete(c.remainReduceTask, reduceTask.ReduceID)
-	// delete(c.workerRegistry, workerID)
+	
 	c.mu.Unlock()
-	return nil
-}
-
-func (c *Coordinator) WorkerQuit(workerID string, reply *string) error {
-	_, exist := c.workerRegistry[workerID]
-	if exist {
-		delete(c.workerRegistry, workerID)
-		if DEBUG {
-			fmt.Printf("Worker quit: <%s>\n", workerID)
-		}
-
-	} else {
-		if DEBUG {
-			fmt.Printf("Unknown worker wants to quit: <%s>\n", workerID)
-		}
-
-	}
 	return nil
 }
 
