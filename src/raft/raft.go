@@ -183,10 +183,11 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	// TODO: RequestVote()
-	// rf.mu.Lock()
-	// defer rf.mu.Unlock()
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-	rf.SetHeartbeat(true)
+	// rf.SetHeartbeat(true)
+	rf.receiveHeartbeat = true
 	DPrintf("R[%d_%d] receive RV from R[%d_%d]", rf.me, rf.currentTerm, args.CandidateID, args.Term)
 
 	reply.Term = rf.currentTerm
@@ -194,6 +195,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
+		rf.isLeader = false
 	} else if args.Term < rf.currentTerm {
 		reply.VoteGranted = false
 		return
@@ -281,7 +283,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.receiveHeartbeat = true
 	reply.Term = rf.currentTerm
 
-	// TODO - this need to be more specific in later tasks.
+	// TODO - this need to be more specific with actual logs in later tasks.
 	if rf.currentTerm < args.Term {
 		rf.currentTerm = args.Term
 		rf.isLeader = false
@@ -341,11 +343,11 @@ func (rf *Raft) killed() bool {
 // then raises an election.
 // Return whether it wins the election or not.
 func (rf *Raft) raiseElection(electionTimeout int64) bool {
-	// rf.mu.Lock()
+	rf.mu.Lock()
 	DPrintf("R[%d_%d] timeout, raising an election.\n", rf.me, rf.currentTerm)
 	rf.currentTerm++
 	rf.votedFor = rf.me
-	var votesCount int32 = 1 // all votes, including agree and disagree
+	var votesCount int32 = 1      // all votes, including agree and disagree
 	var grantVotesCount int32 = 1 // default to vote for itself immediately
 
 	currentTerm := rf.currentTerm
@@ -356,7 +358,7 @@ func (rf *Raft) raiseElection(electionTimeout int64) bool {
 		lastLogIndex = rf.log[len(rf.log)-1].Index
 		lastLogTerm = rf.log[len(rf.log)-1].Term
 	}
-	// rf.mu.Unlock()
+	rf.mu.Unlock()
 
 	resultCh := make(chan bool)
 
@@ -381,8 +383,11 @@ func (rf *Raft) raiseElection(electionTimeout int64) bool {
 				Term:        -1,
 				VoteGranted: false,
 			}
-			rf.sendRequestVote(id, &args, &reply)
-			DPrintf("R[%d_%d] get vote from [%d]: %v\n", rf.me, rf.currentTerm ,id, reply.VoteGranted)
+			if rf.sendRequestVote(id, &args, &reply) {
+				rf.mu.Lock()
+				DPrintf("R[%d_%d] get vote from [%d_%d]: %v\n", rf.me, rf.currentTerm, id, reply.Term, reply.VoteGranted)
+				rf.mu.Unlock()
+			}
 
 			atomic.AddInt32(&votesCount, 1)
 			if reply.VoteGranted {
@@ -393,19 +398,25 @@ func (rf *Raft) raiseElection(electionTimeout int64) bool {
 					resultCh <- false
 				}
 			}
+			rf.mu.Lock()
 			if reply.Term > rf.currentTerm {
 				rf.currentTerm = reply.Term
 			}
+			rf.mu.Unlock()
 		}(i)
 	}
 
 	// Check whether more than half of the votes have been collected.
 	select {
-	case result := <- resultCh:
+	case result := <-resultCh:
+		rf.mu.Lock()
 		DPrintf("R[%d_%d] get election result.", rf.me, rf.currentTerm)
+		rf.mu.Unlock()
 		return result
-	case <- time.After(time.Duration(electionTimeout) * time.Microsecond):
+	case <-time.After(time.Duration(electionTimeout) * time.Microsecond):
+		rf.mu.Lock()
 		DPrintf("R[%d_%d]'s election timeout after %v ms", rf.me, rf.currentTerm, electionTimeout)
+		rf.mu.Unlock()
 		return false
 	}
 }
@@ -414,7 +425,7 @@ func (rf *Raft) ticker() {
 	for rf.killed() == false {
 
 		// Your code here (3A)
-		if rf.isLeader {
+		if _, isLeader := rf.GetState(); isLeader {
 			// periodically send heartbeat to other peers
 			for i := range rf.peers {
 				go func(id int) {
@@ -423,10 +434,12 @@ func (rf *Raft) ticker() {
 					if !rf.sendAppendEntries(id, &args, &reply) {
 						return
 					}
+					rf.mu.Lock()
 					if !reply.Success && reply.Term > rf.currentTerm {
 						rf.currentTerm = reply.Term
 						rf.isLeader = false
 					}
+					rf.mu.Unlock()
 				}(i)
 			}
 
@@ -434,7 +447,7 @@ func (rf *Raft) ticker() {
 			continue
 		}
 
-		// Check if a leader election should be started.
+		// Wait for an election timeout, then check if an election should be raised.
 		rf.SetHeartbeat(false)
 
 		// pause for a random amount of time between 50 and 350
@@ -442,11 +455,15 @@ func (rf *Raft) ticker() {
 		ms := 200 + (rand.Int63() % 300)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 
+		// rf.mu.Lock()
 		if !rf.CheckHeartBeat() {
-			electionTimeout := 100 + (rand.Int63() % 300)
+			electionTimeout := 500 + (rand.Int63() % 300)
 			rf.isLeader = rf.raiseElection(electionTimeout)
+			rf.mu.Lock()
 			DPrintf("R[%d_%d] finish election, result: %v", rf.me, rf.currentTerm, rf.isLeader)
+			rf.mu.Unlock()
 		}
+		// rf.mu.Unlock()
 	}
 }
 
@@ -471,7 +488,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-	// DPrintf()
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
