@@ -19,6 +19,8 @@ package raft
 
 import (
 	//	"bytes"
+	"fmt"
+	"log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -67,7 +69,6 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	// TODO: supplement this raft struct
 	// Persistent state
 	currentTerm int
 	votedFor    int
@@ -91,7 +92,6 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (3A).
-	// TODO: GetState() 考虑是否加锁？
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	term = rf.currentTerm
@@ -100,16 +100,49 @@ func (rf *Raft) GetState() (int, bool) {
 	return term, isleader
 }
 
-func (rf *Raft) CheckHeartBeat() bool {
+// Safe functions of Raft variables with lock
+func (rf *Raft) GetHeartBeat() bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	return rf.receiveHeartbeat
 }
 
-func (rf *Raft) SetHeartbeat(state bool) {
+func (rf *Raft) SetHeartbeat(v bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.receiveHeartbeat = state
+	rf.receiveHeartbeat = v
+}
+
+func (rf *Raft) SetIsLeader(v bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.isLeader = v
+}
+
+func (rf *Raft) SetTerm(v int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.currentTerm = v
+}
+
+func (rf *Raft) DLPrintf(format string, a ...interface{}) {
+	if Debug {
+
+		// copy args to avoid data race
+		args := make([]interface{}, len(a))
+		copy(args, a)
+		rf.mu.Lock()
+		log.Printf(format, args...)
+		rf.mu.Unlock()
+	}
+}
+
+func (rf *Raft) SafeLogf(logFn func() string) {
+	if Debug {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		log.Printf("%s", logFn())
+	}
 }
 
 // save Raft's persistent state to stable storage,
@@ -163,7 +196,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (3A, 3B).
-	// TODO: RequestVoteArgs
 	Term         int
 	CandidateID  int
 	LastLogIndex int
@@ -174,7 +206,6 @@ type RequestVoteArgs struct {
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (3A).
-	// TODO: RequestVoteReply
 	Term        int
 	VoteGranted bool // true means candidate received vote
 }
@@ -182,7 +213,6 @@ type RequestVoteReply struct {
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
-	// TODO: RequestVote()
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -197,7 +227,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = -1
 		rf.isLeader = false
 	} else if args.Term < rf.currentTerm {
-		reply.VoteGranted = false
 		return
 	}
 
@@ -212,21 +241,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.LastLogTerm > lastLogTerm {
 		if rf.votedFor == -1 || rf.votedFor == args.CandidateID {
 			reply.VoteGranted = true
-		} else {
-			reply.VoteGranted = false
 		}
 	} else if args.LastLogTerm == lastLogTerm {
 		if args.LastLogIndex >= lastLogIndex {
 			if rf.votedFor == -1 || rf.votedFor == args.CandidateID {
 				reply.VoteGranted = true
-			} else {
-				reply.VoteGranted = false
 			}
-		} else {
-			reply.VoteGranted = false
 		}
-	} else {
-		reply.VoteGranted = false
 	}
 }
 
@@ -283,7 +304,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.receiveHeartbeat = true
 	reply.Term = rf.currentTerm
 
-	// TODO - this need to be more specific with actual logs in later tasks.
+	// TODO: this need to be more specific with actual logs in later tasks.
 	if rf.currentTerm < args.Term {
 		rf.currentTerm = args.Term
 		rf.isLeader = false
@@ -368,25 +389,18 @@ func (rf *Raft) raiseElection(electionTimeout int64) bool {
 			continue
 		}
 
-		// TODO - 考虑每个goroutine加一个timer？
 		go func(id int) {
-			// rf.mu.Lock()
-			// defer rf.mu.Unlock()
-
 			args := RequestVoteArgs{
 				Term:         currentTerm,
 				CandidateID:  candidateID,
 				LastLogIndex: lastLogIndex,
 				LastLogTerm:  lastLogTerm,
 			}
-			reply := RequestVoteReply{
-				Term:        -1,
-				VoteGranted: false,
-			}
+			reply := RequestVoteReply{}
 			if rf.sendRequestVote(id, &args, &reply) {
-				rf.mu.Lock()
-				DPrintf("R[%d_%d] get vote from [%d_%d]: %v\n", rf.me, rf.currentTerm, id, reply.Term, reply.VoteGranted)
-				rf.mu.Unlock()
+				rf.SafeLogf(func() string {
+					return fmt.Sprintf("R[%d_%d] get vote from [%d_%d]: %v\n", rf.me, rf.currentTerm, id, reply.Term, reply.VoteGranted)
+				})
 			}
 
 			atomic.AddInt32(&votesCount, 1)
@@ -409,20 +423,20 @@ func (rf *Raft) raiseElection(electionTimeout int64) bool {
 	// Check whether more than half of the votes have been collected.
 	select {
 	case result := <-resultCh:
-		rf.mu.Lock()
-		DPrintf("R[%d_%d] get election result.", rf.me, rf.currentTerm)
-		rf.mu.Unlock()
+		rf.SafeLogf(func() string {
+			return fmt.Sprintf("R[%d_%d] get election result.", rf.me, rf.currentTerm)
+		})
 		return result
 	case <-time.After(time.Duration(electionTimeout) * time.Microsecond):
-		rf.mu.Lock()
-		DPrintf("R[%d_%d]'s election timeout after %v ms", rf.me, rf.currentTerm, electionTimeout)
-		rf.mu.Unlock()
+		rf.SafeLogf(func() string {
+			return fmt.Sprintf("R[%d_%d]'s election timeout after %v ms", rf.me, rf.currentTerm, electionTimeout)
+		})
 		return false
 	}
 }
 
 func (rf *Raft) ticker() {
-	for rf.killed() == false {
+	for !rf.killed() {
 
 		// Your code here (3A)
 		if _, isLeader := rf.GetState(); isLeader {
@@ -443,27 +457,23 @@ func (rf *Raft) ticker() {
 				}(i)
 			}
 
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
 			continue
 		}
 
 		// Wait for an election timeout, then check if an election should be raised.
 		rf.SetHeartbeat(false)
 
-		// pause for a random amount of time between 50 and 350
-		// milliseconds.
-		ms := 200 + (rand.Int63() % 300)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
+		electionTimeout := 200 + (rand.Int63() % 300)
+		time.Sleep(time.Duration(electionTimeout) * time.Millisecond)
 
-		// rf.mu.Lock()
-		if !rf.CheckHeartBeat() {
-			electionTimeout := 500 + (rand.Int63() % 300)
-			rf.isLeader = rf.raiseElection(electionTimeout)
-			rf.mu.Lock()
-			DPrintf("R[%d_%d] finish election, result: %v", rf.me, rf.currentTerm, rf.isLeader)
-			rf.mu.Unlock()
+		if !rf.GetHeartBeat() {
+			result := rf.raiseElection(electionTimeout)
+			rf.SetIsLeader(result)
+			rf.SafeLogf(func() string {
+				return fmt.Sprintf("R[%d_%d] finish election, result: %v", rf.me, rf.currentTerm, rf.isLeader)
+			})
 		}
-		// rf.mu.Unlock()
 	}
 }
 
@@ -484,7 +494,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (3A, 3B, 3C).
-	// TODO: initialization in Make()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
