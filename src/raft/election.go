@@ -6,9 +6,9 @@
 package raft
 
 import (
-	"time"
-	"sync/atomic"
 	"math/rand"
+	"sync/atomic"
+	"time"
 )
 
 func randElectionTimeout() int64 {
@@ -40,37 +40,48 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 
 	// rf.receiveHeartbeat = true
-	DPrintf("R[%d_%d] receive RV from R[%d_%d]", rf.me, rf.currentTerm, args.CandidateID, args.Term)
+	DPrintf("R[%d_%d] receive RV from R[%d_%d]", rf.me, rf.CurrentTerm, args.CandidateID, args.Term)
 
-	reply.Term = rf.currentTerm
+	reply.Term = rf.CurrentTerm
 
-	if args.Term > rf.currentTerm {
-		rf.currentTerm = args.Term
-		rf.votedFor = -1
+	if args.Term > rf.CurrentTerm {
+		rf.CurrentTerm = args.Term
+		rf.VotedFor = -1
 		rf.isLeader = false
-	} else if args.Term < rf.currentTerm {
+		rf.persist()
+	} else if args.Term < rf.CurrentTerm {
+		reply.VoteGranted = false
 		return
 	}
 
 	// candidateTerm == rf.currentTerm
 	lastLogIndex := 0
 	lastLogTerm := 0
-	if len(rf.log) > 0 {
-		lastLogIndex = rf.log[len(rf.log)-1].Index
-		lastLogTerm = rf.log[len(rf.log)-1].Term
+	if len(rf.Log) > 0 {
+		lastLogIndex = rf.Log[len(rf.Log)-1].Index
+		lastLogTerm = rf.Log[len(rf.Log)-1].Term
 	}
 
 	if args.LastLogTerm > lastLogTerm {
-		if rf.votedFor == -1 || rf.votedFor == args.CandidateID {
+		if rf.VotedFor == -1 || rf.VotedFor == args.CandidateID {
 			reply.VoteGranted = true
+			rf.VotedFor = args.CandidateID
+			rf.persist()
 		}
 	} else if args.LastLogTerm == lastLogTerm {
 		if args.LastLogIndex >= lastLogIndex {
-			if rf.votedFor == -1 || rf.votedFor == args.CandidateID {
+			if rf.VotedFor == -1 || rf.VotedFor == args.CandidateID {
 				reply.VoteGranted = true
+				rf.VotedFor = args.CandidateID
+				rf.persist()
 			}
 		}
 	}
+
+	// if !reply.VoteGranted {
+	// 	DPrintf("R[%d_%d] reject RV from R[%d_%d], its votedFor: %d.\n",
+	// 		rf.me, rf.CurrentTerm, args.CandidateID, args.Term, rf.VotedFor)
+	// }
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -110,19 +121,20 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // Return whether it wins the election or not.
 func (rf *Raft) raiseElection(electionTimeout int64) bool {
 	rf.mu.Lock()
-	DPrintf("R[%d_%d] timeout, raising an election.\n", rf.me, rf.currentTerm)
-	rf.currentTerm++
-	rf.votedFor = rf.me
+	DPrintf("R[%d_%d] timeout, raising an election.\n", rf.me, rf.CurrentTerm)
+	rf.CurrentTerm++
+	rf.VotedFor = rf.me
+	rf.persist()
 	var votesCount int32 = 1      // all votes count, including agree and disagree
 	var grantVotesCount int32 = 1 // default to vote for itself immediately
 
-	currentTerm := rf.currentTerm
+	currentTerm := rf.CurrentTerm
 	candidateID := rf.me
 	lastLogIndex := 0
 	lastLogTerm := 0
-	if len(rf.log) > 0 {
-		lastLogIndex = rf.log[len(rf.log)-1].Index
-		lastLogTerm = rf.log[len(rf.log)-1].Term
+	if len(rf.Log) > 0 {
+		lastLogIndex = rf.Log[len(rf.Log)-1].Index
+		lastLogTerm = rf.Log[len(rf.Log)-1].Term
 	}
 	rf.mu.Unlock()
 
@@ -144,7 +156,7 @@ func (rf *Raft) raiseElection(electionTimeout int64) bool {
 			reply := RequestVoteReply{}
 			if rf.sendRequestVote(id, &args, &reply) {
 				rf.mu.Lock()
-				DPrintf("R[%d_%d] get vote from [%d_%d]: %v\n", rf.me, rf.currentTerm, id, reply.Term, reply.VoteGranted)
+				DPrintf("R[%d_%d] get vote from [%d_%d]: %v\n", rf.me, rf.CurrentTerm, id, reply.Term, reply.VoteGranted)
 				rf.mu.Unlock()
 			}
 
@@ -158,9 +170,10 @@ func (rf *Raft) raiseElection(electionTimeout int64) bool {
 				}
 			}
 			rf.mu.Lock()
-			if reply.Term > rf.currentTerm {
-				rf.currentTerm = reply.Term
-				rf.votedFor = -1
+			if reply.Term > rf.CurrentTerm {
+				rf.CurrentTerm = reply.Term
+				rf.VotedFor = -1
+				rf.persist()
 			}
 			rf.mu.Unlock()
 		}(i)
@@ -170,13 +183,13 @@ func (rf *Raft) raiseElection(electionTimeout int64) bool {
 	select {
 	case result := <-resultCh:
 		rf.mu.Lock()
-		DPrintf("R[%d_%d] get election result.", rf.me, rf.currentTerm)
+		DPrintf("R[%d_%d] get election result.", rf.me, rf.CurrentTerm)
 		rf.mu.Unlock()
 		return result
 
-	case <-time.After(time.Duration(electionTimeout) * time.Microsecond):
+	case <-time.After(time.Duration(electionTimeout) * time.Millisecond):
 		rf.mu.Lock()
-		DPrintf("R[%d_%d]'s election timeout after %v ms", rf.me, rf.currentTerm, electionTimeout)
+		DPrintf("R[%d_%d]'s election timeout after %v ms", rf.me, rf.CurrentTerm, electionTimeout)
 		rf.mu.Unlock()
 		return false
 	}
