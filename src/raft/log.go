@@ -347,6 +347,6 @@ func (rf *Raft) applyTicker() {
 		}
 
 		rf.mu.Unlock()
-		time.Sleep(40 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 }

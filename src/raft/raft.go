@@ -415,9 +415,9 @@ func (rf *Raft) broadHeartbeat() {
 							rf.nextIndex[peer] = reply.XIndex
 						}
 					}
-					rf.mu.Unlock()
 					DPrintf("R[%d_%d]'s heartbeat for R[%d_%d] detects log inconsistency, nextIndex[%d] = %d, therefore raise AE.\n",
 						rf.me, rf.CurrentTerm, peer, reply.Term, peer, rf.nextIndex[peer])
+					rf.mu.Unlock()
 					go rf.raiseAppendEntries(peer)
 				}
 			}
