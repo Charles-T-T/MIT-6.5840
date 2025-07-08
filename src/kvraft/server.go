@@ -1,15 +1,17 @@
 package kvraft
 
 import (
-	"6.5840/labgob"
-	"6.5840/labrpc"
-	"6.5840/raft"
+	"bytes"
 	"log"
 	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"6.5840/labgob"
+	"6.5840/labrpc"
+	"6.5840/raft"
 )
 
 // Debugging
@@ -52,6 +54,13 @@ type OpResult struct {
 	Err   Err
 }
 
+// Snapshot data structure - all fields must be capitalized
+type SnapshotData struct {
+	KvStore        map[string]string // key-value store
+	LastApplied    map[int64]int64   // clientId -> last applied requestId
+	DuplicateTable map[int64]string  // clientId -> last result for Get operations
+}
+
 type KVServer struct {
 	mu      sync.Mutex
 	me      int
@@ -62,11 +71,13 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	kvStore        map[string]string        // key-value store
-	lastApplied    map[int64]int64          // clientId -> last applied requestId
-	waitingClients map[int]chan OpResult    // index -> channel for waiting clients
-	lastAppliedIdx int                      // last applied log index
-	duplicateTable map[int64]string         // clientId -> last result for Get operations
+	kvStore        map[string]string     // key-value store
+	lastApplied    map[int64]int64       // clientId -> last applied requestId
+	waitingClients map[int]chan OpResult // index -> channel for waiting clients
+	lastAppliedIdx int                   // last applied log index
+	duplicateTable map[int64]string      // clientId -> last result for Get operations
+
+	persister *raft.Persister // for snapshot operations
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -249,22 +260,22 @@ func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *KVServer) applyLoop() {
 	for !kv.killed() {
 		applyMsg := <-kv.applyCh
-		
+
 		if applyMsg.CommandValid {
 			kv.mu.Lock()
-			
+
 			// Ensure we apply commands in order
 			if applyMsg.CommandIndex <= kv.lastAppliedIdx {
 				DPrintf("KV[%d] duplicate apply index=%d lastApplied=%d", kv.me, applyMsg.CommandIndex, kv.lastAppliedIdx)
 				kv.mu.Unlock()
 				continue
 			}
-			
+
 			op := applyMsg.Command.(Op)
 			result := OpResult{}
-			
+
 			DPrintf("KV[%d] applying op: %+v at index=%d", kv.me, op, applyMsg.CommandIndex)
-			
+
 			// Check if we've already applied this request
 			if lastReqId, exists := kv.lastApplied[op.ClientId]; !exists || lastReqId < op.RequestId {
 				// Apply the operation
@@ -298,9 +309,9 @@ func (kv *KVServer) applyLoop() {
 				result.Err = OK
 				DPrintf("KV[%d] duplicate apply C[%d] R[%d] lastApplied=%d", kv.me, op.ClientId, op.RequestId, lastReqId)
 			}
-			
+
 			kv.lastAppliedIdx = applyMsg.CommandIndex
-			
+
 			// Notify waiting client if any
 			if ch, exists := kv.waitingClients[applyMsg.CommandIndex]; exists {
 				select {
@@ -308,21 +319,106 @@ func (kv *KVServer) applyLoop() {
 				default:
 				}
 			}
-			
+
+			// Check if need to create a snapshot
+			if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= kv.maxraftstate {
+				DPrintf("KV[%d] creating snapshot at index=%d, raftStateSize=%d, maxraftstate=%d",
+					kv.me, kv.lastAppliedIdx, kv.persister.RaftStateSize(), kv.maxraftstate)
+				kv.createSnapshot(kv.lastAppliedIdx)
+			}
+
+			kv.mu.Unlock()
+
+		} else if applyMsg.SnapshotValid {
+			// Handle snapshot from Raft
+			kv.mu.Lock()
+			DPrintf("KV[%d] received snapshot at index=%d", kv.me, applyMsg.SnapshotIndex)
+
+			if applyMsg.SnapshotIndex > kv.lastAppliedIdx {
+				kv.restoreSnapshot(applyMsg.Snapshot)
+				kv.lastAppliedIdx = applyMsg.SnapshotIndex
+				DPrintf("KV[%d] restored from snapshot, lastAppliedIdx=%d", kv.me, kv.lastAppliedIdx)
+			}
+
 			kv.mu.Unlock()
 		}
 	}
 }
 
-// the tester calls Kill() when a KVServer instance won't
-// be needed again. for your convenience, we supply
-// code to set rf.dead (without needing a lock),
-// and a killed() method to test rf.dead in
-// long-running loops. you can also add your own
-// code to Kill(). you're not required to do anything
-// about this, but it may be convenient (for example)
-// to suppress debug output from a Kill()ed instance.
+// Create a snapshot of the current state
+func (kv *KVServer) createSnapshot(index int) {
+	// Must be called with kv.mu held
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+
+	snapshot := SnapshotData{
+		KvStore:        make(map[string]string),
+		LastApplied:    make(map[int64]int64),
+		DuplicateTable: make(map[int64]string),
+	}
+
+	// Deep copy the state
+	for k, v := range kv.kvStore {
+		snapshot.KvStore[k] = v
+	}
+	for k, v := range kv.lastApplied {
+		snapshot.LastApplied[k] = v
+	}
+	for k, v := range kv.duplicateTable {
+		snapshot.DuplicateTable[k] = v
+	}
+
+	if err := e.Encode(snapshot); err != nil {
+		DPrintf("KV[%d] failed to encode snapshot: %v", kv.me, err)
+		return
+	}
+
+	data := w.Bytes()
+	DPrintf("KV[%d] created snapshot at index=%d, size=%d bytes", kv.me, index, len(data))
+	kv.rf.Snapshot(index, data)
+}
+
+// Restore state from snapshot
+func (kv *KVServer) restoreSnapshot(data []byte) {
+	// Must be called with kv.mu held
+	if len(data) == 0 {
+		return
+	}
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+
+	var snapshot SnapshotData
+	if err := d.Decode(&snapshot); err != nil {
+		DPrintf("KV[%d] failed to decode snapshot: %v", kv.me, err)
+		return
+	}
+
+	kv.kvStore = make(map[string]string)
+	kv.lastApplied = make(map[int64]int64)
+	kv.duplicateTable = make(map[int64]string)
+
+	for k, v := range snapshot.KvStore {
+		kv.kvStore[k] = v
+	}
+	for k, v := range snapshot.LastApplied {
+		kv.lastApplied[k] = v
+	}
+	for k, v := range snapshot.DuplicateTable {
+		kv.duplicateTable[k] = v
+	}
+
+	DPrintf("KV[%d] restored snapshot: %d keys, %d clients", kv.me, len(kv.kvStore), len(kv.lastApplied))
+}
 func (kv *KVServer) Kill() {
+	// be needed again. for your convenience, we supply
+	// code to set rf.dead (without needing a lock),
+	// and a killed() method to test rf.dead in
+	// long-running loops. you can also add your own
+	// code to Kill(). you're not required to do anything
+	// about this, but it may be convenient (for example)
+	// the tester calls Kill() when a KVServer instance won't
+	// to suppress debug output from a Kill()ed instance.
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
 	// Your code here, if desired.
@@ -349,10 +445,12 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
+	labgob.Register(SnapshotData{})
 
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
+	kv.persister = persister
 
 	// You may need initialization code here.
 	kv.kvStore = make(map[string]string)
@@ -360,6 +458,13 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.waitingClients = make(map[int]chan OpResult)
 	kv.duplicateTable = make(map[int64]string)
 	kv.lastAppliedIdx = 0
+
+	// Restore from snapshot if available
+	snapshot := persister.ReadSnapshot()
+	if len(snapshot) > 0 {
+		kv.restoreSnapshot(snapshot)
+		DPrintf("KV[%d] startup restored from snapshot", kv.me)
+	}
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)

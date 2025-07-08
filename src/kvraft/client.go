@@ -38,7 +38,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // keeps trying forever in the face of all other errors.
 //
 // you can send an RPC with code like this:
-// ok := ck.servers[i].Call("KVServer."+op, &args, &reply)
+// ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
 //
 // the types of args and reply (including whether they are pointers)
 // must match the declared types of the RPC handler function's
@@ -53,6 +53,7 @@ func (ck *Clerk) Get(key string) string {
 		RequestId: reqId,
 	}
 	
+	// Try the last known leader first
 	for {
 		reply := GetReply{}
 		ok := ck.servers[ck.lastLeader].Call("KVServer.Get", &args, &reply)
@@ -67,7 +68,7 @@ func (ck *Clerk) Get(key string) string {
 		
 		// Try next server
 		ck.lastLeader = (ck.lastLeader + 1) % len(ck.servers)
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond) // Slightly longer delay for better performance
 	}
 }
 
@@ -91,6 +92,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		RequestId: reqId,
 	}
 	
+	// Try the last known leader first
 	for {
 		reply := PutAppendReply{}
 		var ok bool
@@ -107,7 +109,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		
 		// Try next server
 		ck.lastLeader = (ck.lastLeader + 1) % len(ck.servers)
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond) // Slightly longer delay for better performance
 	}
 }
 
