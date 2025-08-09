@@ -37,10 +37,12 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 	// save snapshot and persist
 	rf.CurSnapshot = snapshot
+	rf.commitIndex = max(rf.commitIndex, rf.LastIncludedIndex)
+	rf.lastApplied = max(rf.lastApplied, rf.LastIncludedIndex)
 	rf.persist()
 
 	DPrintf("R[%d_%d] Snapshot done: lastIncluded=(Term:%d,Id:%d), curLogLen=%d, snapshotLen=%d\n",
-		rf.me, rf.CurrentTerm, rf.LastIncludedTerm, rf.LastIncludedIndex,  len(rf.Log), len(rf.CurSnapshot))
+		rf.me, rf.CurrentTerm, rf.LastIncludedTerm, rf.LastIncludedIndex, len(rf.Log), len(rf.CurSnapshot))
 }
 
 type InstallSnapshotArgs struct {

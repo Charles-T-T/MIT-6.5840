@@ -293,7 +293,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 		rf.Log = append(rf.Log, LogEntry{Term: rf.CurrentTerm, Index: index, Command: command})
 		rf.persist()
-		DPrintf("Leader R[%d_%d] get new log: %v, lastInclude=(Term:%d, Id:%d), now log[]: %+v\n", 
+		DPrintf("Leader R[%d_%d] get new log: %v, lastInclude=(Term:%d, Id:%d), now log[]: %+v\n",
 			rf.me, term, rf.Log[len(rf.Log)-1], rf.LastIncludedTerm, rf.LastIncludedIndex, rf.Log)
 
 		for peer := range rf.peers {
@@ -332,97 +332,7 @@ func (rf *Raft) broadHeartbeat() {
 		if i == rf.me {
 			continue
 		}
-		// go rf.raiseAppendEntries(i)
-		go func(peer int) {
-			rf.mu.Lock()
-			if !rf.isLeader || rf.killed() {
-				rf.mu.Unlock()
-				return
-			}
-
-			if rf.nextIndex[peer] <= rf.LastIncludedIndex {
-				DPrintf("R[%d_%d] heartbeat raise IS for R[%d] because nextIndex[%d](%d) <= LastIncludedIndex(%d)\n",
-					rf.me, rf.CurrentTerm, peer, peer, rf.nextIndex[peer], rf.LastIncludedIndex)
-				rf.mu.Unlock() // raiseInstallSnapshot(peer) need Lock
-				rf.raiseInstallSnapshot(peer)
-				return
-			}
-
-			prevLogIndex := max(rf.nextIndex[peer]-1, 0)
-			prevLogTerm := 0
-			prevLogPos := 0
-			ok := false
-
-			if prevLogIndex != 0 {
-				ok, prevLogPos = rf.index2Pos(prevLogIndex)
-				if ok {
-					prevLogTerm = rf.Log[prevLogPos].Term
-				} else if prevLogIndex == rf.LastIncludedIndex {
-					// prevLog in snapshot
-					prevLogTerm = rf.LastIncludedIndex
-				} else {
-					DPrintf("⚠️ R[%d_%d] raiseAppendEntries for R[%d] failed because prevLogIndex %d not found in log: %+v\n",
-						rf.me, rf.CurrentTerm, peer, prevLogIndex, rf.Log)
-					log.Fatalf("⚠️ R[%d_%d] nextIndex[%d]=%d, lastIncludedIndex=%d\n",
-						rf.me, rf.CurrentTerm, peer, rf.nextIndex[peer], rf.LastIncludedIndex)
-				}
-
-			}
-
-			args := AppendEntriesArgs{
-				Term:         rf.CurrentTerm,
-				LeaderID:     rf.me,
-				PrevLogIndex: prevLogIndex,
-				PrevLogTerm:  prevLogTerm,
-				LeaderCommit: rf.commitIndex,
-			} // no Entries (empty) for heartbeat
-			reply := AppendEntriesReply{}
-			rf.mu.Unlock()
-
-			if !rf.sendAppendEntries(peer, &args, &reply) {
-				// network error
-				return
-			}
-
-			if !reply.Success {
-				rf.mu.Lock()
-				if reply.Term > rf.CurrentTerm {
-					// not leader anymore
-					rf.CurrentTerm = reply.Term
-					rf.isLeader = false
-					rf.VotedFor = -1
-					rf.persist()
-					rf.mu.Unlock()
-				} else {
-					// log inconsistency
-					if reply.XTerm == -1 {
-						// follower's log is too short
-						rf.nextIndex[peer] = max(reply.XLen, 1)
-					} else {
-						// check if the leader has XTerm
-						lastIndex := -1
-						for i := len(rf.Log) - 1; i >= 0; i-- {
-							if rf.Log[i].Term == reply.XTerm {
-								lastIndex = rf.Log[i].Index
-								break
-							}
-						}
-						if lastIndex != -1 {
-							// has XTerm
-							rf.nextIndex[peer] = lastIndex
-						} else {
-							// doesn't has XTerm
-							rf.nextIndex[peer] = reply.XIndex
-						}
-					}
-					DPrintf("R[%d_%d]'s heartbeat for R[%d_%d] detects log inconsistency, nextIndex[%d] = %d, therefore raise AE.\n",
-						rf.me, rf.CurrentTerm, peer, reply.Term, peer, rf.nextIndex[peer])
-					rf.mu.Unlock()
-					go rf.raiseAppendEntries(peer)
-				}
-			}
-
-		}(i)
+		go rf.raiseAppendEntries(i)
 	}
 }
 

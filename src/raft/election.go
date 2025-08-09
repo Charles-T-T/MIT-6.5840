@@ -121,7 +121,10 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // Return whether it wins the election or not.
 func (rf *Raft) raiseElection(electionTimeout int64) bool {
 	rf.mu.Lock()
-	DPrintf("R[%d_%d] timeout, raising an election.\n", rf.me, rf.CurrentTerm)
+	raiseTerm := rf.CurrentTerm + 1
+	DPrintf("R[%d_%d] timeout, become candidate R[%d_%d] and raise an election.\n", 
+		rf.me, rf.CurrentTerm, rf.me, raiseTerm)
+	rf.isLeader = false
 	rf.CurrentTerm++
 	rf.VotedFor = rf.me
 	rf.persist()
@@ -156,7 +159,7 @@ func (rf *Raft) raiseElection(electionTimeout int64) bool {
 			reply := RequestVoteReply{}
 			if rf.sendRequestVote(id, &args, &reply) {
 				rf.mu.Lock()
-				DPrintf("R[%d_%d] get vote from [%d_%d]: %v\n", rf.me, rf.CurrentTerm, id, reply.Term, reply.VoteGranted)
+				DPrintf("R[%d_%d] get vote from [%d_%d]: %v\n", rf.me, raiseTerm, id, reply.Term, reply.VoteGranted)
 				rf.mu.Unlock()
 			}
 
@@ -183,13 +186,13 @@ func (rf *Raft) raiseElection(electionTimeout int64) bool {
 	select {
 	case result := <-resultCh:
 		rf.mu.Lock()
-		DPrintf("R[%d_%d] get election result.", rf.me, rf.CurrentTerm)
+		DPrintf("R[%d_%d] get election result.", rf.me, raiseTerm)
 		rf.mu.Unlock()
 		return result
 
 	case <-time.After(time.Duration(electionTimeout) * time.Millisecond):
 		rf.mu.Lock()
-		DPrintf("R[%d_%d]'s election timeout after %v ms", rf.me, rf.CurrentTerm, electionTimeout)
+		DPrintf("R[%d_%d]'s election timeout after %v ms", rf.me, raiseTerm, electionTimeout)
 		rf.mu.Unlock()
 		return false
 	}
