@@ -1,13 +1,18 @@
 package kvsrv
 
-import "6.5840/labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"math/big"
+	"sync/atomic"
 
+	"6.5840/labrpc"
+)
 
 type Clerk struct {
 	server *labrpc.ClientEnd
 	// You will have to modify this struct.
+	id        int64
+	requestID int64
 }
 
 func nrand() int64 {
@@ -21,6 +26,7 @@ func MakeClerk(server *labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.server = server
 	// You'll have to add code here.
+	ck.id = nrand()
 	return ck
 }
 
@@ -37,7 +43,17 @@ func MakeClerk(server *labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
-	return ""
+	args := GetArgs{Key: key}
+	reply := GetReply{}
+	try := 0
+	success := false
+	for !success {
+		try++
+		success = ck.server.Call("KVServer.Get", &args, &reply)
+		DPrintf("CK[%d] Get[%s], %v; try time: %d", ck.id, key, success, try)
+	}
+	DPrintf("CK[%d] Get[%s] = '%s'", ck.id, key, reply.Value)
+	return reply.Value
 }
 
 // shared by Put and Append.
@@ -50,7 +66,23 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) string {
 	// You will have to modify this function.
-	return ""
+	args := PutAppendArgs{
+		Key:       key,
+		Value:     value,
+		ClerkID:   ck.id,
+		RequestID: atomic.AddInt64(&ck.requestID, 1),
+	}
+	reply := PutAppendReply{}
+	success := false
+	try := 0
+	for !success {
+		try++
+		success = ck.server.Call("KVServer."+op, &args, &reply)
+		DPrintf("CK[%d] %s[%s]='%s', %v\ntry time: %d\nrequestID: %d",
+			ck.id, op, key, value, success, try, args.RequestID)
+	}
+
+	return reply.Value
 }
 
 func (ck *Clerk) Put(key string, value string) {
