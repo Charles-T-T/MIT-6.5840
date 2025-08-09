@@ -123,6 +123,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		return
 	} else if args.Term > rf.CurrentTerm {
+		DPrintf("R[%d_%d] update term to %d by AE from R[%d_%d]\n",
+			rf.me, rf.CurrentTerm, args.Term, args.LeaderID, args.Term)
 		rf.CurrentTerm = args.Term
 		rf.isLeader = false
 		rf.VotedFor = -1
@@ -142,12 +144,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	// Check if it's just a heartbeat
-	if len(args.Entries) == 0 {
-		DPrintf("R[%d_%d] receive headtbeat from R[%d_%d]", rf.me, rf.CurrentTerm, args.LeaderID, args.Term)
-	} else {
-		// Append any new entries not already in the log
-		DPrintf("R[%d_%d] receive AE from R[%d_%d]: %+v\n", rf.me, rf.CurrentTerm, args.LeaderID, args.Term, args)
+	DPrintf("R[%d_%d] receive AE from R[%d_%d]: %+v\n", rf.me, rf.CurrentTerm, args.LeaderID, args.Term, args)
+	if len(args.Entries) > 0 {
 		rf.appendNewEntries(args.Entries)
 	}
 
@@ -167,14 +165,13 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // Organize args and then send the AppendEntries RPC to a peer.
 // Return immediately if not leader anymore or killed.
 func (rf *Raft) raiseAppendEntries(peer int) {
-	success := false
 	try := 1
 	for {
 		rf.mu.Lock()
 		DPrintf("R[%d_%d] raise AE for R[%d], try time: %d\n", rf.me, rf.CurrentTerm, peer, try)
 		try++
 
-		if !rf.isLeader || rf.killed() || success {
+		if !rf.isLeader || rf.killed() {
 			rf.mu.Unlock()
 			break
 		}
@@ -236,7 +233,7 @@ func (rf *Raft) raiseAppendEntries(peer int) {
 		if !rf.sendAppendEntries(peer, &args, &reply) {
 			DPrintf("R[%d_%d]'s AE for R[%d_%d] fail because of network error.\n",
 				rf.me, curTerm, peer, reply.Term)
-			time.Sleep(time.Second * 1)
+			time.Sleep(time.Millisecond * 50)
 			continue
 		}
 
@@ -272,20 +269,20 @@ func (rf *Raft) raiseAppendEntries(peer int) {
 					} else {
 						// doesn't has XTerm
 						rf.nextIndex[peer] = reply.XIndex
-						if rf.nextIndex[peer] < 0 {
-							log.Fatalf("R[%d_%d] nextIndex[%d] < 0: %d\n", rf.me, rf.CurrentTerm, peer, rf.nextIndex[peer])
-						}
 					}
 				}
 			}
 		} else {
 			// append successfully
+			DPrintf("R[%d_%d]'s AE for R[%d_%d] success.\n", rf.me, curTerm, peer, reply.Term)
 			if len(entries) > 0 {
-				DPrintf("R[%d_%d]'s AE for R[%d_%d] success.\n", rf.me, curTerm, peer, reply.Term)
 				rf.matchIndex[peer] = entries[len(entries)-1].Index
-				rf.nextIndex[peer] = rf.matchIndex[peer] + 1
+			} else {
+				rf.matchIndex[peer] = prevLogIndex // empty entries, but still pass prevLogIndex check.
 			}
-			success = true
+			rf.nextIndex[peer] = rf.matchIndex[peer] + 1
+			rf.mu.Unlock()
+			break
 		}
 		rf.mu.Unlock()
 
@@ -322,31 +319,32 @@ func (rf *Raft) leaderUpdateCID() {
 func (rf *Raft) applyTicker() {
 	for !rf.killed() {
 		rf.mu.Lock()
-		
+
 		for rf.lastApplied < rf.commitIndex {
-			appliedOnce := false // avoid apply a lot and cause deadlock in 3D
-			for _, log := range rf.Log {
-				if log.Index == rf.lastApplied+1 {
-					msg := ApplyMsg{
-						CommandValid: true,
-						Command:      log.Command,
-						CommandIndex: log.Index,
-					}
-					rf.mu.Unlock()
-					rf.applyCh <- msg
-					rf.mu.Lock()
-					rf.lastApplied++
-					appliedOnce = true
-					DPrintf("R[%d_%d] apply log: %+v\n", rf.me, rf.CurrentTerm, log)
-					break
-				}
-			}
-			if !appliedOnce {
+			nextIndex := rf.lastApplied + 1
+
+			ok, pos := rf.index2Pos(nextIndex)
+			if !ok {
+				// index not found, may be compacted in snapshot, just wait for update
 				break
 			}
+
+			log := rf.Log[pos]
+			msg := ApplyMsg{
+				CommandValid: true,
+				Command:      log.Command,
+				CommandIndex: log.Index,
+			}
+
+			rf.lastApplied++
+
+			rf.mu.Unlock()
+			rf.applyCh <- msg
+			rf.mu.Lock()
+			DPrintf("R[%d_%d] apply log: %+v\n", rf.me, rf.CurrentTerm, log)
 		}
 
 		rf.mu.Unlock()
-		time.Sleep(40 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 }

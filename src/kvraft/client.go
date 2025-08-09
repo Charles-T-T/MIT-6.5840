@@ -1,13 +1,19 @@
 package kvraft
 
-import "6.5840/labrpc"
-import "crypto/rand"
-import "math/big"
-
+import (
+	"6.5840/labrpc"
+	"crypto/rand"
+	"math/big"
+	"sync/atomic"
+	"time"
+)
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	clientId    int64
+	requestId   int64
+	lastLeader  int
 }
 
 func nrand() int64 {
@@ -21,6 +27,9 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.clientId = nrand()
+	ck.requestId = 0
+	ck.lastLeader = 0
 	return ck
 }
 
@@ -29,15 +38,38 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // keeps trying forever in the face of all other errors.
 //
 // you can send an RPC with code like this:
-// ok := ck.servers[i].Call("KVServer."+op, &args, &reply)
+// ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
 //
 // the types of args and reply (including whether they are pointers)
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
-
 	// You will have to modify this function.
-	return ""
+	reqId := atomic.AddInt64(&ck.requestId, 1)
+	
+	args := GetArgs{
+		Key:       key,
+		ClientId:  ck.clientId,
+		RequestId: reqId,
+	}
+	
+	// Try the last known leader first
+	for {
+		reply := GetReply{}
+		ok := ck.servers[ck.lastLeader].Call("KVServer.Get", &args, &reply)
+		
+		if ok && reply.Err == OK {
+			return reply.Value
+		}
+		
+		if ok && reply.Err == ErrNoKey {
+			return ""
+		}
+		
+		// Try next server
+		ck.lastLeader = (ck.lastLeader + 1) % len(ck.servers)
+		time.Sleep(50 * time.Millisecond) // Slightly longer delay for better performance
+	}
 }
 
 // shared by Put and Append.
@@ -50,11 +82,41 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	reqId := atomic.AddInt64(&ck.requestId, 1)
+	
+	args := PutAppendArgs{
+		Key:       key,
+		Value:     value,
+		Op:        op,
+		ClientId:  ck.clientId,
+		RequestId: reqId,
+	}
+	
+	// Try the last known leader first
+	for {
+		reply := PutAppendReply{}
+		var ok bool
+		
+		if op == "Put" {
+			ok = ck.servers[ck.lastLeader].Call("KVServer.Put", &args, &reply)
+		} else {
+			ok = ck.servers[ck.lastLeader].Call("KVServer.Append", &args, &reply)
+		}
+		
+		if ok && reply.Err == OK {
+			return
+		}
+		
+		// Try next server
+		ck.lastLeader = (ck.lastLeader + 1) % len(ck.servers)
+		time.Sleep(50 * time.Millisecond) // Slightly longer delay for better performance
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
 	ck.PutAppend(key, value, "Put")
 }
+
 func (ck *Clerk) Append(key string, value string) {
 	ck.PutAppend(key, value, "Append")
 }
