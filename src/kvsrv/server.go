@@ -11,7 +11,6 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
 		log.Println("--------------------------------------")
 		log.Printf(format, a...)
-		log.Println("--------------------------------------")
 	}
 	return
 }
