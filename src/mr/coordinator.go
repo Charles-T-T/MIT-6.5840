@@ -1,7 +1,6 @@
 package mr
 
 import (
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -66,9 +65,7 @@ func (c *Coordinator) monitorMapTask(file string, mapID string) {
 	if exist {
 		c.mu.Lock()
 		delete(c.workerRegistry, workerID)
-		if DEBUG {
-			fmt.Printf("Map job by %s time out!\n", workerID)
-		}
+		DPrintf("Map job by %s time out!\n", workerID)
 		c.mu.Unlock()
 		c.toMapTasks <- MapTask{Filename: file, MapID: mapID, NMap: c.nMap, NReduce: c.nReduce}
 	}
@@ -81,9 +78,7 @@ func (c *Coordinator) monitorReduceTask(reduceID string) {
 	if exist {
 		c.mu.Lock()
 		delete(c.workerRegistry, workerID)
-		if DEBUG {
-			fmt.Printf("Reduce job by %s time out!\n", workerID)
-		}
+		DPrintf("Reduce job by %s time out!\n", workerID)
 		c.mu.Unlock()
 		c.toReduceTasks <- ReduceTask{ReduceID: reduceID}
 	}
@@ -126,9 +121,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 				NReduce:  c.nReduce,
 			}
 			c.toMapTasks <- mapTask
-			if DEBUG {
-				fmt.Println("Get todo-file:", file)
-			}
+			DPrintf("Get todo-file: %s\n", file)
 			c.remainMapTask[file] = "init"
 		}
 		// Wait all Map tasks to be done
@@ -137,9 +130,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		}
 		close(c.toMapTasks)
 		c.allMapDone = true
-		if DEBUG {
-			fmt.Println("All map tasks done.")
-		}
+		DPrintf("All map tasks done.\n")
 	}()
 
 	// Manage Reduce tasks
@@ -159,9 +150,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		}
 		close(c.toReduceTasks)
 		c.allReduceDone = true
-		if DEBUG {
-			fmt.Println("All reduce tasks done.")
-		}
+		DPrintf("All reduce tasks done.\n")
 	}()
 	c.server()
 	return &c

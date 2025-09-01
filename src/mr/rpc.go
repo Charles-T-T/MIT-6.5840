@@ -8,7 +8,6 @@ package mr
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"strconv"
 )
@@ -55,14 +54,12 @@ func (c *Coordinator) WorkerGiveMapRes(mapTask MapTask, reply *string) error {
 	filename := mapTask.Filename
 	_, exist := c.workerRegistry[workerID]
 	if !exist {
-		fmt.Println("Illegal map result: get from unknown worker:", workerID)
+		DPrintf("Illegal map result: get from unknown worker: %s\n", workerID)
 		return nil
 	}
 
 	c.mu.Lock()
-	if DEBUG {
-		fmt.Println("Successfully get map result from:", workerID)
-	}
+	DPrintf("Successfully get map result from: %s\n", workerID)
 	delete(c.remainMapTask, filename)
 	c.mu.Unlock()
 	return nil
@@ -94,7 +91,7 @@ func (c *Coordinator) WorkerGiveReduceRes(reduceTask ReduceTask, reply *string) 
 	workerID := reduceTask.WorkerID
 	_, exist := c.workerRegistry[workerID]
 	if !exist {
-		fmt.Println("Illegal reduce result: get from unknown worker:", workerID)
+		DPrintf("Illegal reduce result: get from unknown worker: %s\n", workerID)
 		return nil
 	}
 
@@ -102,15 +99,13 @@ func (c *Coordinator) WorkerGiveReduceRes(reduceTask ReduceTask, reply *string) 
 	*reply = newname
 	err := os.Rename(reduceTask.TempResFile, newname)
 	if err != nil {
-		log.Fatal("Error when rename temp file:", err)
+		DPrintf("Error when rename temp file: %v\n", err)
 	}
 
 	c.mu.Lock()
-	if DEBUG {
-		fmt.Println("Successfully get reduce result from:", workerID)
-	}
+	DPrintf("Successfully get reduce result from: %s\n", workerID)
 	delete(c.remainReduceTask, reduceTask.ReduceID)
-	
+
 	c.mu.Unlock()
 	return nil
 }
