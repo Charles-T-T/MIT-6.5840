@@ -6,13 +6,14 @@
 package raft
 
 import (
+	"context"
 	"math/rand"
 	"sync/atomic"
 	"time"
 )
 
 func randElectionTimeout() int64 {
-	return 400 + (rand.Int63() % 300) // ms
+	return 300 + (rand.Int63() % 300) // ms
 }
 
 type StateType int
@@ -94,10 +95,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 
 	DPrintf("R[%d_%d] receive RV from R[%d_%d]", rf.me, rf.CurrentTerm, args.CandidateID, args.Term)
-	rf.lastHeartbeatTime = time.Now()
 
 	reply.Term = rf.CurrentTerm
-
 	if args.Term < rf.CurrentTerm {
 		return
 	}
@@ -115,17 +114,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// candidateTerm == rf.currentTerm
 	lastLogTerm, lastLogIndex := rf.lastLogTermIndex()
 
-	if args.LastLogTerm > lastLogTerm {
+	if args.LastLogTerm > lastLogTerm ||
+		args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex {
 		reply.VoteGranted = true
 		rf.VotedFor = args.CandidateID
 		rf.persist()
-		return
-	}
-
-	if args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex {
-		reply.VoteGranted = true
-		rf.VotedFor = args.CandidateID
-		rf.persist()
+		rf.lastHeartbeatTime = time.Now()
 		return
 	}
 }
@@ -168,36 +162,35 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // Return whether it wins the election or not.
 func (rf *Raft) raiseElection(electionTimeout int64) bool {
 	rf.mu.Lock()
+
 	raiseTerm := rf.CurrentTerm + 1
 	DPrintf("R[%d_%d] timeout after %d ms, become candidate R[%d_%d] and raise an election.\n",
 		rf.me, rf.CurrentTerm, electionTimeout, rf.me, raiseTerm)
 	rf.CurrentTerm++
 	rf.VotedFor = rf.me
 	rf.persist()
+
 	var votesCount int32 = 1 // all votes count, including agree and disagree
 	var agreeVotes int32 = 1 // default to vote for itself immediately
 	var disagreeVotes int32 = 0
 
 	currentTerm := rf.CurrentTerm
 	candidateID := rf.me
-	lastLogIndex := rf.LastIncludedIndex
-	lastLogTerm := rf.LastIncludedTerm
-	if len(rf.Log) > 0 {
-		lastLogIndex = rf.Log[len(rf.Log)-1].Index
-		lastLogTerm = rf.Log[len(rf.Log)-1].Term
-	}
+	lastLogTerm, lastLogIndex := rf.lastLogTermIndex()
 
 	rf.mu.Unlock()
 
 	resultCh := make(chan bool, len(rf.peers))
 
 	// Send RequestVote RPC to other peers
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
 		}
 
-		// TODO: consider using Context
 		go func(id int) {
 			args := RequestVoteArgs{
 				Term:         currentTerm,
@@ -207,8 +200,16 @@ func (rf *Raft) raiseElection(electionTimeout int64) bool {
 			}
 			reply := RequestVoteReply{}
 			if rf.sendRequestVote(id, &args, &reply) {
+				select {
+				case <-ctx.Done():
+					// DPrintf("R[%d_%d]'s election already finished.\n", rf.me, currentTerm)
+					return
+				default:
+				}
+
 				rf.mu.Lock()
-				DPrintf("R[%d_%d] get vote from [%d_%d]: %v\n", rf.me, raiseTerm, id, reply.Term, reply.VoteGranted)
+				DPrintf("R[%d_%d] get vote from [%d_%d]: %v\n",
+					rf.me, raiseTerm, id, reply.Term, reply.VoteGranted)
 				if reply.Term > rf.CurrentTerm {
 					rf.CurrentTerm = reply.Term
 					rf.beFollower()
@@ -216,6 +217,8 @@ func (rf *Raft) raiseElection(electionTimeout int64) bool {
 					resultCh <- false
 				}
 				rf.mu.Unlock()
+			} else {
+				return
 			}
 
 			atomic.AddInt32(&votesCount, 1)
@@ -242,7 +245,6 @@ func (rf *Raft) raiseElection(electionTimeout int64) bool {
 	case result := <-resultCh:
 		DPrintf("R[%d_%d] get election result: %v.", rf.me, raiseTerm, result)
 		return result
-
 	case <-time.After(time.Duration(timeout) * time.Millisecond):
 		DPrintf("R[%d_%d]'s election timeout after %v ms", rf.me, raiseTerm, timeout)
 		return false
@@ -261,15 +263,14 @@ func (rf *Raft) broadcastHeartbeat() {
 
 func (rf *Raft) electTicker() {
 	for !rf.killed() {
+		timeout := randElectionTimeout()
+
 		rf.mu.Lock()
 		state := rf.state
-		// lastHeartbeat := rf.lastHeartbeatTime
-		timeout := randElectionTimeout()
 		rf.mu.Unlock()
-
 		if state == Leader {
 			rf.broadcastHeartbeat()
-			time.Sleep(time.Duration(heartbeatTimeout) * time.Millisecond)
+			time.Sleep(time.Duration(heartbeatInterval) * time.Millisecond)
 			continue
 		}
 
@@ -288,7 +289,7 @@ func (rf *Raft) electTicker() {
 			if win && rf.state == Candidate {
 				rf.beLeader()
 			}
-		} 
+		}
 		rf.mu.Unlock()
 	}
 }

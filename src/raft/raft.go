@@ -28,7 +28,7 @@ import (
 	"6.5840/labrpc"
 )
 
-var heartbeatTimeout int64 = 70 // ms
+var heartbeatInterval int64 = 70 // ms
 
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -213,7 +213,6 @@ func (rf *Raft) readPersist(data []byte) {
 
 	DPrintf("R[%d] readPersist done: term=%d, votedFor=%d, lastIncluded=(Term:%d,Index:%d), log=%v\n",
 		rf.me, rf.CurrentTerm, rf.VotedFor, rf.LastIncludedTerm, rf.LastIncludedIndex, rf.Log)
-
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
