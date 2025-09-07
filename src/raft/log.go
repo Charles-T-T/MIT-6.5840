@@ -6,7 +6,6 @@
 package raft
 
 import (
-	"log"
 	"time"
 )
 
@@ -76,10 +75,15 @@ func (rf *Raft) appendNewEntries(entries []LogEntry) {
 		found, pos := rf.index2Pos(entries[i].Index)
 		if found {
 			if rf.Log[pos].Term != entries[i].Term {
+				// conflict: same Index, different Term
 				rf.Log = rf.Log[:pos]
 				break
+			} else {
+				// already in current logs
+				continue
 			}
 		} else {
+			// not found in current logs, indicating that entries[i:] are all new logs
 			break
 		}
 	}
@@ -93,20 +97,13 @@ func (rf *Raft) followerUpdateCID(args AppendEntriesArgs) {
 		return
 	}
 
-	lastIndex := 0
-	if len(rf.Log) > 0 {
-		lastIndex = rf.Log[len(rf.Log)-1].Index
-	}
-
+	_, lastIndex := rf.lastLogTermIndex()
 	oldCID := rf.commitIndex
 	newCID := min(args.LeaderCommit, lastIndex)
 	if newCID > oldCID {
-		_, pos := rf.index2Pos(newCID)
-		if rf.Log[pos].Term == args.Term {
-			rf.commitIndex = newCID
-			DPrintf("R[%d_%d] update CID by: %v,\n leaderCID: %d, oldCID: %d, nowCID: %d, log: %+v\n",
-				rf.me, rf.CurrentTerm, args, args.LeaderCommit, oldCID, rf.commitIndex, rf.Log)
-		}
+		rf.commitIndex = newCID
+		// DPrintf("R[%d_%d] update CID by: %+v,\n leaderCID: %d, oldCID: %d, nowCID: %d, log: %+v\n",
+		// 	rf.me, rf.CurrentTerm, args, args.LeaderCommit, oldCID, rf.commitIndex, rf.Log)
 	}
 }
 
@@ -114,20 +111,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	rf.receiveHeartbeat = true
+	// DPrintf("R[%d_%d] receive AE from R[%d_%d]: %+v\n",
+	// 	rf.me, rf.CurrentTerm, args.LeaderID, args.Term, args)
 
 	// Reply false if term < currentTerm
 	reply.Term = rf.CurrentTerm
 	if args.Term < rf.CurrentTerm {
 		reply.Term = rf.CurrentTerm
 		reply.Success = false
+		DPrintf("R[%d_%d] reject AE from R[%d_%d]: smaller term.\n",
+			rf.me, rf.CurrentTerm, args.LeaderID, args.Term)
 		return
 	} else if args.Term > rf.CurrentTerm {
 		DPrintf("R[%d_%d] update term to %d by AE from R[%d_%d]\n",
 			rf.me, rf.CurrentTerm, args.Term, args.LeaderID, args.Term)
 		rf.CurrentTerm = args.Term
-		rf.isLeader = false
-		rf.VotedFor = -1
+		rf.beFollower()
 		rf.persist()
 	}
 
@@ -136,166 +135,185 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.XLen = len(rf.Log)
 	ok, XTerm, XIndex := rf.hasPrevLog(args.PrevLogIndex, args.PrevLogTerm)
 	if !ok {
-		DPrintf("R[%d_%d] reject AE from R[%d_%d] because of log inconsistency, its lastInclude=(Term:%d, Id:%d), log: %+v\n args: %+v\n",
-			rf.me, rf.CurrentTerm, args.LeaderID, args.Term, rf.LastIncludedTerm, rf.LastIncludedIndex, rf.Log, args)
+		DPrintf("R[%d_%d] reject AE from R[%d_%d] because of log inconsistency, "+
+			"its lastInclude=(Term:%d, Id:%d), log: %+v\n args: %+v\n",
+			rf.me, rf.CurrentTerm, args.LeaderID, args.Term,
+			rf.LastIncludedTerm, rf.LastIncludedIndex, rf.Log, args)
 		reply.Success = false
 		reply.XTerm = XTerm
 		reply.XIndex = XIndex
 		return
 	}
 
-	DPrintf("R[%d_%d] receive AE from R[%d_%d]: %+v\n", rf.me, rf.CurrentTerm, args.LeaderID, args.Term, args)
 	if len(args.Entries) > 0 {
 		rf.appendNewEntries(args.Entries)
 	}
 
-	// If leaderCommit > commitIndex,
-	// set commitIndex = min(leaderCommit, index of last new entry)
 	rf.followerUpdateCID(*args)
 
 	reply.Success = true
+	rf.lastHeartbeatTime = time.Now()
 }
 
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+func (rf *Raft) sendAppendEntries(
+	server int,
+	args *AppendEntriesArgs,
+	reply *AppendEntriesReply,
+) bool {
+	if len(args.Entries) > 0 {
+		// DPrintf("R[%d_%d] send AE to R[%d]: %+v\n", rf.me, args.Term, server, args)
+	} else {
+		// DPrintf("R[%d_%d] send heartbeat to R[%d]: %+v\n", rf.me, args.Term, server, args)
+	}
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	rf.leaderUpdateCID()
 	return ok
+}
+
+func (rf *Raft) buildApendEntriesArgs(peer int) AppendEntriesArgs {
+	prevLogIndex := rf.nextIndex[peer] - 1
+	prevLogTerm := 0
+	prevLogPos := 0
+	ok := false
+
+	if prevLogIndex != 0 {
+		ok, prevLogPos = rf.index2Pos(prevLogIndex)
+		if ok {
+			prevLogTerm = rf.Log[prevLogPos].Term
+		} else if prevLogIndex == rf.LastIncludedIndex {
+			// prevLog in snapshot
+			prevLogTerm = rf.LastIncludedTerm
+		}
+	}
+
+	nextPos := prevLogPos + 1
+	if prevLogPos == 0 {
+		nextPos = 0
+	}
+
+	entries := make([]LogEntry, len(rf.Log[nextPos:]))
+	copy(entries, rf.Log[nextPos:])
+
+	return AppendEntriesArgs{
+		Term:         rf.CurrentTerm,
+		LeaderID:     rf.me,
+		PrevLogIndex: prevLogIndex,
+		PrevLogTerm:  prevLogTerm,
+		Entries:      entries,
+		LeaderCommit: rf.commitIndex,
+	}
+}
+
+func (rf *Raft) handleAppendEntriesReply(
+	peer int,
+	args AppendEntriesArgs,
+	reply AppendEntriesReply,
+) {
+	if reply.Success {
+		// DPrintf("R[%d_%d]'s AE for R[%d_%d] success, args: %+v\n",
+		// 	rf.me, args.Term, peer, reply.Term, args)
+		n := len(args.Entries)
+		if n > 0 {
+			rf.matchIndex[peer] = args.Entries[n-1].Index
+		} else {
+			rf.matchIndex[peer] = args.PrevLogIndex
+		}
+		rf.nextIndex[peer] = rf.matchIndex[peer] + 1
+		rf.leaderUpdateCID()
+	} else {
+		// unsuccess
+		if reply.Term > rf.CurrentTerm {
+			DPrintf("R[%d_%d]'s AE for R[%d_%d] fail: outdated term.\n",
+				rf.me, rf.CurrentTerm, peer, reply.Term)
+			rf.CurrentTerm = reply.Term
+			rf.beFollower()
+			rf.persist()
+		} else {
+			DPrintf("R[%d_%d]'s AE for R[%d_%d] fail: log inconsistency.\n",
+				rf.me, rf.CurrentTerm, peer, reply.Term)
+			if reply.XTerm == -1 {
+				// follower's log too short
+				rf.nextIndex[peer] = max(reply.XLen, 1)
+			} else {
+				// check if the leader has XTerm
+				lastIndex := -1
+				for i := len(rf.Log) - 1; i >= 0; i-- {
+					if rf.Log[i].Term == reply.XTerm {
+						lastIndex = rf.Log[i].Index
+						break
+					}
+				}
+				if lastIndex != -1 {
+					// leader has XTerm
+					rf.nextIndex[peer] = lastIndex
+				} else {
+					// leader doesn't has XTerm
+					rf.nextIndex[peer] = reply.XIndex
+				}
+			}
+		}
+	}
 }
 
 // Organize args and then send the AppendEntries RPC to a peer.
 // Return immediately if not leader anymore or killed.
 func (rf *Raft) raiseAppendEntries(peer int) {
-	try := 1
-	for {
+	for try := 1; try <= 3; try++ {
 		rf.mu.Lock()
-		DPrintf("R[%d_%d] raise AE for R[%d], try time: %d\n", rf.me, rf.CurrentTerm, peer, try)
-		try++
+		// DPrintf("R[%d_%d] raise AE for R[%d], try time: %d\n", rf.me, rf.CurrentTerm, peer, try)
 
-		if !rf.isLeader || rf.killed() {
+		if rf.state != Leader || rf.killed() {
 			rf.mu.Unlock()
-			break
+			return
 		}
 
 		if rf.nextIndex[peer] <= rf.LastIncludedIndex {
 			DPrintf("R[%d_%d] raise IS for R[%d] because nextIndex[%d](%d) <= LastIncludedIndex(%d)\n",
 				rf.me, rf.CurrentTerm, peer, peer, rf.nextIndex[peer], rf.LastIncludedIndex)
-			rf.mu.Unlock() // raiseInstallSnapshot(peer) need Lock
+			rf.mu.Unlock() // raiseInstallSnapshot(peer) requires the lock
 			rf.raiseInstallSnapshot(peer)
-			continue // break? return?
+			time.Sleep(time.Millisecond * 7)
+			continue
 		}
 
-		curTerm := rf.CurrentTerm
-		// FIXME - use 'max(rf.nextIndex[peer]-1, 0)' is not a perfect way
-		// to handle nextIndex, logically;
-		// sometimes the nextIndex[peer] is ZERO, leading to prevLogIndex < 0,
-		// which is wrong, but I just can't find why this occurs :(
-		prevLogIndex := max(rf.nextIndex[peer]-1, 0)
-		prevLogTerm := 0
-		prevLogPos := 0
-		ok := false
-
-		if prevLogIndex != 0 {
-			ok, prevLogPos = rf.index2Pos(prevLogIndex)
-			if ok {
-				prevLogTerm = rf.Log[prevLogPos].Term
-			} else if prevLogIndex == rf.LastIncludedIndex {
-				// prevLog in snapshot
-				prevLogTerm = rf.LastIncludedTerm
-			} else {
-				DPrintf("⚠️ R[%d_%d] raiseAppendEntries for R[%d] failed because prevLogIndex %d not found in log: %+v\n",
-					rf.me, curTerm, peer, prevLogIndex, rf.Log)
-				log.Fatalf("⚠️ R[%d_%d] nextIndex[%d]=%d, lastIncludedIndex=%d\n",
-					rf.me, curTerm, peer, rf.nextIndex[peer], rf.LastIncludedIndex)
-			}
-		}
-
-		nextPos := prevLogPos + 1
-		if prevLogPos == 0 {
-			nextPos = 0
-		}
-
-		entries := make([]LogEntry, len(rf.Log[nextPos:]))
-		copy(entries, rf.Log[nextPos:])
-
-		args := AppendEntriesArgs{
-			Term:         rf.CurrentTerm,
-			LeaderID:     rf.me,
-			PrevLogIndex: prevLogIndex,
-			PrevLogTerm:  prevLogTerm,
-			Entries:      entries,
-			LeaderCommit: rf.commitIndex,
-		}
+		args := rf.buildApendEntriesArgs(peer)
 		reply := AppendEntriesReply{}
 
-		DPrintf("R[%d_%d] send AE to R[%d]: %+v\n", rf.me, curTerm, peer, args)
 		rf.mu.Unlock()
 
 		if !rf.sendAppendEntries(peer, &args, &reply) {
-			DPrintf("R[%d_%d]'s AE for R[%d_%d] fail because of network error.\n",
-				rf.me, curTerm, peer, reply.Term)
-			time.Sleep(time.Millisecond * 50)
+			// DPrintf("R[%d_%d]'s AE for R[%d] fail: network error.\n", rf.me, curTerm, peer)
+			time.Sleep(time.Millisecond * 7)
 			continue
 		}
 
 		rf.mu.Lock()
-		if !reply.Success {
-			if reply.Term > rf.CurrentTerm {
-				// not leader anymore
-				rf.CurrentTerm = reply.Term
-				rf.isLeader = false
-				rf.VotedFor = -1
-				rf.persist()
-				DPrintf("R[%d_%d]'s AE for R[%d_%d] fail because of smaller term.\n",
-					rf.me, curTerm, peer, reply.Term)
-			} else {
-				// log inconsistency
-				DPrintf("R[%d_%d]'s AE for R[%d_%d] fail because of log inconsistency.\n",
-					rf.me, curTerm, peer, reply.Term)
-				if reply.XTerm == -1 {
-					// follower's log is too short
-					rf.nextIndex[peer] = max(reply.XLen, 1)
-				} else {
-					// check if the leader has XTerm
-					lastIndex := -1
-					for i := len(rf.Log) - 1; i >= 0; i-- {
-						if rf.Log[i].Term == reply.XTerm {
-							lastIndex = rf.Log[i].Index
-							break
-						}
-					}
-					if lastIndex != -1 {
-						// has XTerm
-						rf.nextIndex[peer] = lastIndex
-					} else {
-						// doesn't has XTerm
-						rf.nextIndex[peer] = reply.XIndex
-					}
-				}
-			}
-		} else {
-			// append successfully
-			DPrintf("R[%d_%d]'s AE for R[%d_%d] success.\n", rf.me, curTerm, peer, reply.Term)
-			if len(entries) > 0 {
-				rf.matchIndex[peer] = entries[len(entries)-1].Index
-			} else {
-				rf.matchIndex[peer] = prevLogIndex // empty entries, but still pass prevLogIndex check.
-			}
-			rf.nextIndex[peer] = rf.matchIndex[peer] + 1
+		if rf.state != Leader {
 			rf.mu.Unlock()
-			break
+			return
 		}
+
+		rf.handleAppendEntriesReply(peer, args, reply)
 		rf.mu.Unlock()
 
-		time.Sleep(time.Millisecond * 10)
+		if reply.Success {
+			return
+		}
+
+		time.Sleep(time.Millisecond * 5)
 	}
 }
 
 // (leader) Check if commitIndex can be updated
 func (rf *Raft) leaderUpdateCID() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	// DPrintf("Leader R[%d_%d] tries updating CID...\n", rf.me, rf.CurrentTerm)
 
-	if len(rf.Log) == 0 || !rf.isLeader {
+	if len(rf.Log) == 0 {
+		// DPrintf("Leader R[%d_%d] fail to update CID: empty log.\n", rf.me, rf.CurrentTerm)
+		return
+	}
+
+	if rf.state != Leader {
+		// DPrintf("Leader R[%d_%d] fail to update CID: not leader anynmore.\n", rf.me, rf.CurrentTerm)
 		return
 	}
 
@@ -307,10 +325,15 @@ func (rf *Raft) leaderUpdateCID() {
 			}
 		}
 		// only commit log entry whose term is the leader's own term
-		if matchCount > len(rf.peers)/2 && rf.Log[i].Term == rf.CurrentTerm {
-			rf.commitIndex = rf.Log[i].Index
-			DPrintf("Leader R[%d_%d]'s CID updates to: %d\n", rf.me, rf.CurrentTerm, rf.commitIndex)
-			break
+		if matchCount > len(rf.peers)/2 {
+			if rf.Log[i].Term == rf.CurrentTerm {
+				rf.commitIndex = rf.Log[i].Index
+				// DPrintf("Leader R[%d_%d]'s CID updates to: %d\n", rf.me, rf.CurrentTerm, rf.commitIndex)
+				break
+			} else {
+				// DPrintf("Leader R[%d_%d] fail to update CID: not its term. CurCID: %d.\n",
+				// 	rf.me, rf.CurrentTerm, rf.commitIndex)
+			}
 		}
 	}
 }
@@ -322,7 +345,6 @@ func (rf *Raft) applyTicker() {
 
 		for rf.lastApplied < rf.commitIndex {
 			nextIndex := rf.lastApplied + 1
-
 			ok, pos := rf.index2Pos(nextIndex)
 			if !ok {
 				// index not found, may be compacted in snapshot, just wait for update
@@ -337,11 +359,18 @@ func (rf *Raft) applyTicker() {
 			}
 
 			rf.lastApplied++
+			curTerm := rf.CurrentTerm
 
-			rf.mu.Unlock()
-			rf.applyCh <- msg
-			rf.mu.Lock()
-			DPrintf("R[%d_%d] apply log: %+v\n", rf.me, rf.CurrentTerm, log)
+			select {
+			case rf.applyCh <- msg:
+				DPrintf("R[%d_%d] apply log: %+v\n", rf.me, curTerm, log)
+			default:
+				rf.lastApplied--
+				DPrintf("R[%d_%d] drop ApplyMsg (command), channel full", rf.me, rf.CurrentTerm)
+				rf.mu.Unlock()
+				time.Sleep(2 * time.Millisecond)
+				rf.mu.Lock()
+			}
 		}
 
 		rf.mu.Unlock()

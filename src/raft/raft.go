@@ -28,7 +28,7 @@ import (
 	"6.5840/labrpc"
 )
 
-var heartbeatTimeout int64 = 50 // ms
+var heartbeatInterval int64 = 70 // ms
 
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -69,9 +69,10 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	isLeader         bool
-	receiveHeartbeat bool
-	applyCh          chan ApplyMsg
+	isLeader          bool
+	state             StateType
+	lastHeartbeatTime time.Time
+	applyCh           chan ApplyMsg
 
 	// Persistent state
 	CurrentTerm       int
@@ -99,73 +100,25 @@ func (rf *Raft) GetState() (int, bool) {
 	return rf.CurrentTerm, rf.isLeader
 }
 
-// Safe functions of Raft variables with lock
-func (rf *Raft) GetHeartBeat() bool {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	return rf.receiveHeartbeat
-}
-
-func (rf *Raft) SetHeartbeat(v bool) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	rf.receiveHeartbeat = v
-}
-
-func (rf *Raft) SetIsLeader(v bool) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	rf.isLeader = v
-
-	if v { // newly becomes the leader
-		// Reinitialize nextIndex[] and matchIndex[]
-		rf.nextIndex = make([]int, len(rf.peers))
-		rf.matchIndex = make([]int, len(rf.peers))
-		for i := range rf.peers {
-			if len(rf.Log) == 0 {
-				rf.nextIndex[i] = 1
-			} else {
-				rf.nextIndex[i] = rf.Log[len(rf.Log)-1].Index + 1
-			}
-			rf.matchIndex[i] = 0
-		}
-	}
-}
-
-func (rf *Raft) SetTerm(v int) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	rf.CurrentTerm = v
-}
-
-func (rf *Raft) SafeLogf(logFn func() string) {
-	if Debug {
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
-		log.Printf("%s", logFn())
-	}
-}
-
 // translate LogEntry's Index to its position in log[]
 func (rf *Raft) index2Pos(index int) (bool, int) {
-	if index == 0 {
-		return false, 0
+	if index <= rf.LastIncludedIndex {
+		return false, -1 // compacted in snapshot
 	}
+	pos := index - (rf.LastIncludedIndex + 1)
+	if pos < 0 || pos >= len(rf.Log) {
+		return false, -1
+	}
+	return true, pos
+}
 
-	if index <= len(rf.Log) && rf.Log[index-1].Index == index {
-		return true, index - 1
+func (rf *Raft) lastLogTermIndex() (int, int) {
+	l := len(rf.Log)
+	if l > 0 {
+		return rf.Log[l-1].Term, rf.Log[l-1].Index
+	} else {
+		return rf.LastIncludedTerm, rf.LastIncludedIndex
 	}
-
-	ok := false
-	pos := -1
-	for i, log := range rf.Log {
-		if log.Index == index {
-			pos = i
-			ok = true
-			break
-		}
-	}
-	return ok, pos
 }
 
 // save Raft's persistent state to stable storage,
@@ -198,8 +151,8 @@ func (rf *Raft) persist() {
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
-	if len(data) < 1 { // bootstrap without any state?
-		DPrintf("R[%d_%d] readPersist, no data to restore.\n", rf.me, rf.CurrentTerm)
+	if len(data) < 1 {
+		// DPrintf("R[%d_%d] readPersist, no data to restore.\n", rf.me, rf.CurrentTerm)
 		return
 	}
 	// Your code here (3C).
@@ -258,9 +211,8 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.commitIndex = max(rf.commitIndex, rf.LastIncludedIndex)
 	rf.lastApplied = max(rf.lastApplied, rf.LastIncludedIndex)
 
-	DPrintf("R[%d] readPersist done: term=%d, votedFor=%d, lastInclud=(Term:%d,Index:%d), logLen=%d\n",
-		rf.me, rf.CurrentTerm, rf.VotedFor, rf.LastIncludedTerm, rf.LastIncludedIndex, len(rf.Log))
-
+	DPrintf("R[%d] readPersist done: term=%d, votedFor=%d, lastIncluded=(Term:%d,Index:%d), log=%v\n",
+		rf.me, rf.CurrentTerm, rf.VotedFor, rf.LastIncludedTerm, rf.LastIncludedIndex, rf.Log)
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -276,35 +228,26 @@ func (rf *Raft) readPersist(data []byte) {
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
 	// Your code here (3B).
-	// time.Sleep(60 * time.Millisecond) // a time to receive possible heartbeat
 	rf.mu.Lock()
-	term, isLeader = rf.CurrentTerm, rf.isLeader
-	if isLeader {
-		if len(rf.Log) == 0 {
-			index = rf.LastIncludedIndex + 1 // consider if there exists a snapshot.
-		} else {
-			index = rf.Log[len(rf.Log)-1].Index + 1
-		}
-
+	defer rf.mu.Unlock()
+	if rf.state == Leader {
+		_, lastLogIndex := rf.lastLogTermIndex()
+		index := lastLogIndex + 1
 		rf.Log = append(rf.Log, LogEntry{Term: rf.CurrentTerm, Index: index, Command: command})
 		rf.persist()
 		DPrintf("Leader R[%d_%d] get new log: %v, lastInclude=(Term:%d, Id:%d), now log[]: %+v\n",
-			rf.me, term, rf.Log[len(rf.Log)-1], rf.LastIncludedTerm, rf.LastIncludedIndex, rf.Log)
+			rf.me, rf.CurrentTerm, rf.Log[len(rf.Log)-1], rf.LastIncludedTerm, rf.LastIncludedIndex, rf.Log)
 
 		for peer := range rf.peers {
 			if peer != rf.me {
 				go rf.raiseAppendEntries(peer)
 			}
 		}
+		return index, rf.CurrentTerm, true
+	} else {
+		return -1, -1, false
 	}
-	rf.mu.Unlock()
-
-	return index, term, isLeader
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -326,42 +269,6 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-// Leader sends heartbeat to other peers
-func (rf *Raft) broadHeartbeat() {
-	for i := range rf.peers {
-		if i == rf.me {
-			continue
-		}
-		go rf.raiseAppendEntries(i)
-	}
-}
-
-func (rf *Raft) ticker() {
-	for !rf.killed() {
-
-		// Your code here (3A)
-		if _, isLeader := rf.GetState(); isLeader {
-			// periodically send heartbeat to other peers
-			rf.broadHeartbeat()
-			time.Sleep(time.Duration(heartbeatTimeout) * time.Millisecond)
-			continue
-		}
-
-		// Wait for an election timeout, then check if an election should be raised.
-		rf.SetHeartbeat(false)
-		time.Sleep(time.Duration(randElectionTimeout()) * time.Millisecond)
-
-		if !rf.GetHeartBeat() {
-			result := rf.raiseElection(randElectionTimeout())
-			rf.SetIsLeader(result)
-
-			rf.mu.Lock()
-			DPrintf("R[%d_%d] finish election, result: %v", rf.me, rf.CurrentTerm, rf.isLeader)
-			rf.mu.Unlock()
-		}
-	}
-}
-
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -379,6 +286,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (3A, 3B, 3C).
+	rf.lastHeartbeatTime = time.Now()
+	rf.VotedFor = -1
+	rf.Log = make([]LogEntry, 0, 128)
+	rf.nextIndex = make([]int, len(peers))
+	rf.matchIndex = make([]int, len(peers))
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -386,7 +298,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	DPrintf("R[%d_%d] is now online.\n", rf.me, rf.CurrentTerm)
 
 	// start ticker goroutine to start elections
-	go rf.ticker()
+	go rf.electTicker()
 
 	// start ticker goroutine to start apply committed log
 	go rf.applyTicker()
