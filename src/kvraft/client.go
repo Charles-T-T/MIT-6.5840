@@ -1,19 +1,20 @@
 package kvraft
 
 import (
-	"6.5840/labrpc"
 	"crypto/rand"
 	"math/big"
 	"sync/atomic"
 	"time"
+
+	"6.5840/labrpc"
 )
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-	clientId    int64
-	requestId   int64
-	lastLeader  int
+	clientId   int64
+	requestId  int64
+	lastLeader int
 }
 
 func nrand() int64 {
@@ -46,26 +47,26 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
 	reqId := atomic.AddInt64(&ck.requestId, 1)
-	
+
 	args := GetArgs{
 		Key:       key,
 		ClientId:  ck.clientId,
 		RequestId: reqId,
 	}
-	
+
 	// Try the last known leader first
 	for {
 		reply := GetReply{}
 		ok := ck.servers[ck.lastLeader].Call("KVServer.Get", &args, &reply)
-		
+
 		if ok && reply.Err == OK {
 			return reply.Value
 		}
-		
+
 		if ok && reply.Err == ErrNoKey {
 			return ""
 		}
-		
+
 		// Try next server
 		ck.lastLeader = (ck.lastLeader + 1) % len(ck.servers)
 		time.Sleep(50 * time.Millisecond) // Slightly longer delay for better performance
@@ -83,7 +84,7 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
 	reqId := atomic.AddInt64(&ck.requestId, 1)
-	
+
 	args := PutAppendArgs{
 		Key:       key,
 		Value:     value,
@@ -91,22 +92,22 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		ClientId:  ck.clientId,
 		RequestId: reqId,
 	}
-	
+
 	// Try the last known leader first
 	for {
 		reply := PutAppendReply{}
 		var ok bool
-		
+
 		if op == "Put" {
 			ok = ck.servers[ck.lastLeader].Call("KVServer.Put", &args, &reply)
 		} else {
 			ok = ck.servers[ck.lastLeader].Call("KVServer.Append", &args, &reply)
 		}
-		
+
 		if ok && reply.Err == OK {
 			return
 		}
-		
+
 		// Try next server
 		ck.lastLeader = (ck.lastLeader + 1) % len(ck.servers)
 		time.Sleep(50 * time.Millisecond) // Slightly longer delay for better performance
