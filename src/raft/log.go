@@ -102,8 +102,10 @@ func (rf *Raft) followerUpdateCID(args AppendEntriesArgs) {
 	newCID := min(args.LeaderCommit, lastIndex)
 	if newCID > oldCID {
 		rf.commitIndex = newCID
-		// DPrintf("R[%d_%d] update CID by: %+v,\n leaderCID: %d, oldCID: %d, nowCID: %d, log: %+v\n",
-		// 	rf.me, rf.CurrentTerm, args, args.LeaderCommit, oldCID, rf.commitIndex, rf.Log)
+		// DPrintf(
+		// 	"R[%d_%d] update CID by: %+v,\n leaderCID: %d, oldCID: %d, nowCID: %d, log: %+v\n",
+		// 	rf.me, rf.CurrentTerm, args, args.LeaderCommit, oldCID, rf.commitIndex, rf.Log,
+		// )
 	}
 }
 
@@ -111,16 +113,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	// DPrintf("R[%d_%d] receive AE from R[%d_%d]: %+v\n",
-	// 	rf.me, rf.CurrentTerm, args.LeaderID, args.Term, args)
+	// DPrintf(
+	// 	"R[%d_%d] receive AE from R[%d_%d]: %+v\n",
+	// 	rf.me, rf.CurrentTerm, args.LeaderID, args.Term, args,
+	// )
 
 	// Reply false if term < currentTerm
 	reply.Term = rf.CurrentTerm
 	if args.Term < rf.CurrentTerm {
 		reply.Term = rf.CurrentTerm
 		reply.Success = false
-		DPrintf("R[%d_%d] reject AE from R[%d_%d]: smaller term.\n",
-			rf.me, rf.CurrentTerm, args.LeaderID, args.Term)
+		DPrintf(
+			"R[%d_%d] reject AE from R[%d_%d]: smaller term.\n",
+			rf.me, rf.CurrentTerm, args.LeaderID, args.Term,
+		)
 		return
 	} else if args.Term > rf.CurrentTerm {
 		rf.CurrentTerm = args.Term
@@ -133,10 +139,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.XLen = len(rf.Log)
 	ok, XTerm, XIndex := rf.hasPrevLog(args.PrevLogIndex, args.PrevLogTerm)
 	if !ok {
-		DPrintf("R[%d_%d] reject AE from R[%d_%d] because of log inconsistency, "+
-			"its lastInclude=(Term:%d, Id:%d), log: %+v\n args: %+v\n",
+		DPrintf(
+			"R[%d_%d] reject AE from R[%d_%d] because of log inconsistency, "+
+				"its lastInclude=(Term:%d, Id:%d), log: %+v\n args: %+v\n",
 			rf.me, rf.CurrentTerm, args.LeaderID, args.Term,
-			rf.LastIncludedTerm, rf.LastIncludedIndex, rf.Log, args)
+			rf.LastIncludedTerm, rf.LastIncludedIndex, rf.Log, args,
+		)
 		reply.Success = false
 		reply.XTerm = XTerm
 		reply.XIndex = XIndex
@@ -220,14 +228,18 @@ func (rf *Raft) handleAppendEntriesReply(
 	} else {
 		// unsuccess
 		if reply.Term > rf.CurrentTerm {
-			DPrintf("R[%d_%d]'s AE for R[%d_%d] fail: outdated term.\n",
-				rf.me, rf.CurrentTerm, peer, reply.Term)
+			DPrintf(
+				"R[%d_%d]'s AE for R[%d_%d] fail: outdated term.\n",
+				rf.me, rf.CurrentTerm, peer, reply.Term,
+			)
 			rf.CurrentTerm = reply.Term
 			rf.beFollower()
 			rf.persist()
 		} else {
-			DPrintf("R[%d_%d]'s AE for R[%d_%d] fail: log inconsistency.\n",
-				rf.me, rf.CurrentTerm, peer, reply.Term)
+			DPrintf(
+				"R[%d_%d]'s AE for R[%d_%d] fail: log inconsistency.\n",
+				rf.me, rf.CurrentTerm, peer, reply.Term,
+			)
 			if reply.XTerm == -1 {
 				// follower's log too short
 				rf.nextIndex[peer] = max(reply.XLen, 1)
@@ -265,8 +277,10 @@ func (rf *Raft) raiseAppendEntries(peer int) {
 		}
 
 		if rf.nextIndex[peer] <= rf.LastIncludedIndex {
-			DPrintf("R[%d_%d] raise IS for R[%d] because nextIndex[%d](%d) <= LastIncludedIndex(%d)\n",
-				rf.me, rf.CurrentTerm, peer, peer, rf.nextIndex[peer], rf.LastIncludedIndex)
+			DPrintf(
+				"R[%d_%d] raise IS for R[%d] because nextIndex[%d](%d) <= LastIncludedIndex(%d)\n",
+				rf.me, rf.CurrentTerm, peer, peer, rf.nextIndex[peer], rf.LastIncludedIndex,
+			)
 			rf.mu.Unlock() // raiseInstallSnapshot(peer) requires the lock
 			rf.raiseInstallSnapshot(peer)
 			time.Sleep(time.Millisecond * 7)
@@ -329,8 +343,10 @@ func (rf *Raft) leaderUpdateCID() {
 				// DPrintf("Leader R[%d_%d]'s CID updates to: %d\n", rf.me, rf.CurrentTerm, rf.commitIndex)
 				break
 			} else {
-				// DPrintf("Leader R[%d_%d] fail to update CID: not its term. CurCID: %d.\n",
-				// 	rf.me, rf.CurrentTerm, rf.commitIndex)
+				// DPrintf(
+				// 	"Leader R[%d_%d] fail to update CID: not its term. CurCID: %d.\n",
+				// 	rf.me, rf.CurrentTerm, rf.commitIndex,
+				// )
 			}
 		}
 	}
