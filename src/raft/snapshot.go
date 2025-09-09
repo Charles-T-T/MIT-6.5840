@@ -16,8 +16,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	DPrintf("R[%d_%d] receive snapshot at index %d, current log length: %d\n",
-		rf.me, rf.CurrentTerm, index, len(rf.Log))
+	DPrintf(
+		"R[%d_%d] receive snapshot at index %d, current log length: %d\n",
+		rf.me, rf.CurrentTerm, index, len(rf.Log),
+	)
 
 	// outdated snapshot
 	if index <= rf.LastIncludedIndex {
@@ -27,8 +29,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	ok, pos := rf.index2Pos(index)
 	if !ok {
 		// index not in current log, may have been compacted in CurSnapshot
-		DPrintf("R[%d_%d] Snapshot index %d not found in log, current log length: %d\n",
-			rf.me, rf.CurrentTerm, index, len(rf.Log))
+		DPrintf(
+			"R[%d_%d] Snapshot index %d not found in log, current log length: %d\n",
+			rf.me, rf.CurrentTerm, index, len(rf.Log),
+		)
 		return
 	}
 
@@ -43,9 +47,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.lastApplied = max(rf.lastApplied, rf.LastIncludedIndex)
 	rf.persist()
 
-	DPrintf("R[%d_%d] Snapshot done: lastIncluded=(Term:%d,Id:%d), curLogLen=%d\n",
-		rf.me, rf.CurrentTerm, rf.LastIncludedTerm,
-		rf.LastIncludedIndex, len(rf.Log))
+	DPrintf(
+		"R[%d_%d] Snapshot done: lastIncluded=(Term:%d,Id:%d), curLogLen=%d\n",
+		rf.me, rf.CurrentTerm, rf.LastIncludedTerm, rf.LastIncludedIndex, len(rf.Log),
+	)
 }
 
 type InstallSnapshotArgs struct {
@@ -69,15 +74,19 @@ func (rf *Raft) InstallSnapshot(
 
 	rf.lastHeartbeatTime = time.Now()
 
-	DPrintf("R[%d_%d] receive IS from R[%d_%d], lastIncluded=(Term:%d, Id:%d)",
+	DPrintf(
+		"R[%d_%d] receive IS from R[%d_%d], lastIncluded=(Term:%d, Id:%d)",
 		rf.me, rf.CurrentTerm, args.LeaderId, args.Term,
-		args.LastIncludedTerm, args.LastIncludedIndex)
+		args.LastIncludedTerm, args.LastIncludedIndex,
+	)
 
 	reply.Term = rf.CurrentTerm
 
 	if args.Term < rf.CurrentTerm {
-		DPrintf("R[%d_%d] reject IS from R[%d_%d]: term larger.",
-			rf.me, rf.CurrentTerm, args.LeaderId, args.Term)
+		DPrintf(
+			"R[%d_%d] reject IS from R[%d_%d]: term larger.",
+			rf.me, rf.CurrentTerm, args.LeaderId, args.Term,
+		)
 		return
 	}
 
@@ -90,10 +99,12 @@ func (rf *Raft) InstallSnapshot(
 
 	// Ignore snapshot if it's outdated
 	if args.LastIncludedIndex <= rf.LastIncludedIndex {
-		DPrintf("R[%d_%d] reject IS from R[%d_%d]: outdated snapshot. "+
-			"Its lastIncludedIndex: %d, log: %+v\n",
+		DPrintf(
+			"R[%d_%d] reject IS from R[%d_%d]: outdated snapshot. "+
+				"Its lastIncludedIndex: %d, log: %+v\n",
 			rf.me, rf.CurrentTerm, args.LeaderId, args.Term,
-			rf.LastIncludedIndex, rf.Log)
+			rf.LastIncludedIndex, rf.Log,
+		)
 		return
 	}
 
@@ -104,7 +115,7 @@ func (rf *Raft) InstallSnapshot(
 		SnapshotTerm:  args.LastIncludedTerm,
 		SnapshotIndex: args.LastIncludedIndex,
 	}
-	
+
 	rf.mu.Unlock()
 	DPrintf("R[%d_%d] is going to send snapshot to applyCh.\n", rf.me, reply.Term)
 	rf.applyCh <- msg
@@ -137,8 +148,10 @@ func (rf *Raft) sendInstallSnapshot(
 	args *InstallSnapshotArgs,
 	reply *InstallSnapshotReply,
 ) bool {
-	DPrintf("R[%d_%d] send IS to R[%d], lastIncluded=(Term:%d,Index:%d)\n",
-		rf.me, args.Term, server, args.LastIncludedIndex, args.LastIncludedTerm)
+	DPrintf(
+		"R[%d_%d] send IS to R[%d], lastIncluded=(Term:%d,Index:%d)\n",
+		rf.me, args.Term, server, args.LastIncludedIndex, args.LastIncludedTerm,
+	)
 	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
 	return ok
 }
@@ -170,10 +183,14 @@ func (rf *Raft) raiseInstallSnapshot(server int) {
 		rf.nextIndex[server] = args.LastIncludedIndex + 1
 		rf.matchIndex[server] = args.LastIncludedIndex
 
-		DPrintf("R[%d_%d] IS to R[%d_%d] done, nextIndex[%d]=%d\n",
-			rf.me, args.Term, server, reply.Term, server, rf.nextIndex[server])
+		DPrintf(
+			"R[%d_%d] IS to R[%d_%d] done, nextIndex[%d]=%d\n",
+			rf.me, args.Term, server, reply.Term, server, rf.nextIndex[server],
+		)
 	} else {
-		DPrintf("R[%d_%d] IS to R[%d] fail because of network error\n",
-			rf.me, args.Term, server)
+		// DPrintf(
+		// 	"R[%d_%d] IS to R[%d] fail because of network error\n",
+		// 	rf.me, args.Term, server,
+		// )
 	}
 }

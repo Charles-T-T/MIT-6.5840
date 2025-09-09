@@ -164,8 +164,10 @@ func (rf *Raft) raiseElection(electionTimeout int64) bool {
 	rf.mu.Lock()
 
 	raiseTerm := rf.CurrentTerm + 1
-	DPrintf("R[%d_%d] timeout after %d ms, become candidate R[%d_%d] and raise an election.\n",
-		rf.me, rf.CurrentTerm, electionTimeout, rf.me, raiseTerm)
+	DPrintf(
+		"R[%d_%d] timeout after %d ms, become candidate R[%d_%d] and raise an election.\n",
+		rf.me, rf.CurrentTerm, electionTimeout, rf.me, raiseTerm,
+	)
 	rf.CurrentTerm++
 	rf.VotedFor = rf.me
 	rf.persist()
@@ -208,8 +210,10 @@ func (rf *Raft) raiseElection(electionTimeout int64) bool {
 				}
 
 				rf.mu.Lock()
-				DPrintf("R[%d_%d] get vote from [%d_%d]: %v\n",
-					rf.me, raiseTerm, id, reply.Term, reply.VoteGranted)
+				DPrintf(
+					"R[%d_%d] get vote from [%d_%d]: %v\n",
+					rf.me, raiseTerm, id, reply.Term, reply.VoteGranted,
+				)
 				if reply.Term > rf.CurrentTerm {
 					rf.CurrentTerm = reply.Term
 					rf.beFollower()

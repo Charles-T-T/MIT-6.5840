@@ -211,8 +211,10 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.commitIndex = max(rf.commitIndex, rf.LastIncludedIndex)
 	rf.lastApplied = max(rf.lastApplied, rf.LastIncludedIndex)
 
-	DPrintf("R[%d] readPersist done: term=%d, votedFor=%d, lastIncluded=(Term:%d,Index:%d), log=%v\n",
-		rf.me, rf.CurrentTerm, rf.VotedFor, rf.LastIncludedTerm, rf.LastIncludedIndex, rf.Log)
+	DPrintf(
+		"R[%d] readPersist done: term=%d, votedFor=%d, lastIncluded=(Term:%d,Index:%d), log=%v\n",
+		rf.me, rf.CurrentTerm, rf.VotedFor, rf.LastIncludedTerm, rf.LastIncludedIndex, rf.Log,
+	)
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -236,8 +238,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		index := lastLogIndex + 1
 		rf.Log = append(rf.Log, LogEntry{Term: rf.CurrentTerm, Index: index, Command: command})
 		rf.persist()
-		DPrintf("Leader R[%d_%d] get new log: %v, lastInclude=(Term:%d, Id:%d), now log[]: %+v\n",
-			rf.me, rf.CurrentTerm, rf.Log[len(rf.Log)-1], rf.LastIncludedTerm, rf.LastIncludedIndex, rf.Log)
+		DPrintf(
+			"Leader R[%d_%d] get new log: %v, lastInclude=(Term:%d, Id:%d), now log[]: %+v\n",
+			rf.me, rf.CurrentTerm, rf.Log[len(rf.Log)-1], rf.LastIncludedTerm, rf.LastIncludedIndex, rf.Log,
+		)
 
 		for peer := range rf.peers {
 			if peer != rf.me {
